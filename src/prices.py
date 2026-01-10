@@ -36,6 +36,7 @@ class Prices:
 
         df["timestamp"] = pd.to_datetime(df["window_start"], unit="ns")
         df = df.sort_values("timestamp").set_index("timestamp")
+        df = pd.DataFrame(df[["close"]]).rename(columns={"close": ticker})
 
         start_date = parse_date(cast(pd.Timestamp, df.index[0]))
         end_date = parse_date(cast(pd.Timestamp, df.index[-1]))

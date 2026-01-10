@@ -19,7 +19,7 @@ def check_data_dir(data_dir: str) -> Tuple[Path, list[str]]:
         list(
             item.name
             for item in data_dir_path.iterdir()
-            if item.is_dir() and item.name in [at.value for at in ASSET_TYPES]
+            if item.is_dir() and any(item.name == at for at in ASSET_TYPES)
         )
     )
 

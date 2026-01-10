@@ -1,10 +1,10 @@
 from datetime import date, datetime
-from enum import Enum
+from enum import StrEnum
 
 import pandas as pd
 
 
-class AssetType(str, Enum):
+class AssetType(StrEnum):
     """Asset type enumeration."""
 
     STOCKS = "stocks"
