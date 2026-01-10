@@ -8,7 +8,8 @@ from .schemas import ASSET_TYPE_CONFIG, ASSET_TYPES, AssetType, DateLike
 
 
 def check_data_dir(data_dir: str) -> Tuple[Path, list[str]]:
-    """Check if data directory exists and contains expected asset type subfolders. Returns data_dir Path and asset_types list."""
+    """Check if data directory exists and contains expected asset type subfolders.
+    Returns data_dir path and asset_types list."""
     data_dir_path = Path(data_dir)
 
     if not data_dir_path.exists() or not data_dir_path.is_dir():
@@ -18,7 +19,7 @@ def check_data_dir(data_dir: str) -> Tuple[Path, list[str]]:
         list(
             item.name
             for item in data_dir_path.iterdir()
-            if item.is_dir() and item.name in ASSET_TYPES
+            if item.is_dir() and item.name in [at.value for at in ASSET_TYPES]
         )
     )
 
@@ -33,7 +34,7 @@ def check_data_dir(data_dir: str) -> Tuple[Path, list[str]]:
 
 
 def parse_date(date_input: DateLike = None, default: DateLike = None) -> date:
-    """Parse any date/datetime string, timestamp, or date object and return a date object. Uses today's date if both are None."""
+    """Parse any date/datetime string, timestamp, or date object and return a date object."""
     date_input = date_input or default
     if date_input is None:
         return datetime.now().date()
@@ -75,7 +76,9 @@ def determine_asset_type(
     date_start: str | None = None,
     date_end: str | None = None,
 ) -> Tuple[AssetType, list[Path]]:
-    """Determine asset type by checking folders for ticker existence. Returns asset_type and files in date range."""
+    """Determine asset type by checking folders for ticker existence.
+    Returns asset_type and files in date range.
+    """
     start = parse_date(date_start, "2000-01-01")
     end = parse_date(date_end, datetime.now().date().strftime("%Y-%m-%d"))
 
@@ -86,10 +89,11 @@ def determine_asset_type(
 
         try:
             last_file = files_in_range[-1]
-            normalized_ticker = normalize_ticker(ticker, cast(AssetType, asset_type))
+            asset_type_enum = AssetType(asset_type)
+            normalized_ticker = normalize_ticker(ticker, asset_type_enum)
             df = pd.read_csv(last_file, compression="gzip")
             if "ticker" in df.columns and (df["ticker"] == normalized_ticker).any():
-                return cast(AssetType, asset_type), files_in_range
+                return asset_type_enum, files_in_range
         except Exception:
             continue
 
@@ -102,8 +106,10 @@ def load_ticker_data(
     ticker: str,
     date_start: str | None = None,
     date_end: str | None = None,
-) -> pd.DataFrame:
-    """Load and concatenate ticker data from files in range. Determines asset type and loads data."""
+) -> Tuple[pd.DataFrame, AssetType]:
+    """Load and concatenate ticker data from files in range.
+    Determines asset type and loads data.
+    """
     asset_type, files_in_range = determine_asset_type(
         data_dir, asset_types, ticker, date_start, date_end
     )
@@ -124,4 +130,4 @@ def load_ticker_data(
     if not dfs:
         raise ValueError(f"No data found for `{asset_type}` ticker `{ticker}`")
 
-    return pd.concat(dfs, ignore_index=True)
+    return pd.concat(dfs, ignore_index=True), asset_type
