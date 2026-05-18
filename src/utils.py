@@ -3,9 +3,11 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Tuple, cast
 
+import numpy as np
 import pandas as pd
 
-from .schemas import ASSET_TYPE_CONFIG, ASSET_TYPES, AssetType, DateLike
+from .checks import check_prices
+from .schemas import ASSET_TYPE_CONFIG, ASSET_TYPES, AssetType, ChecksConfig, DateLike
 
 
 def check_data_dir(data_dir: str) -> Tuple[Path, list[str]]:
@@ -175,3 +177,28 @@ def load_prices(file_name: str, load_dir: str = "./data/prices") -> pd.DataFrame
         return df
     except Exception as e:
         raise RuntimeError(f"Failed to load prices from `{file_path}`: {e}") from e
+
+
+def verify_saved_prices(df: pd.DataFrame, save_dir: str, format: str) -> bool:
+    """Reload the saved file and confirm it matches the in-memory data."""
+    ticker = df.columns[0]
+    loaded = load_prices(f"{ticker}.{format}", load_dir=save_dir)
+    values_match = np.allclose(df.values, loaded.values, equal_nan=True)
+    index_match = df.index.equals(loaded.index)
+    if not (values_match and index_match):
+        print(f"❗ Saved file for {ticker} does not match in-memory data!")
+        return False
+    print(f"✔️  Verified {ticker} round-trips cleanly through {format}")
+    print(loaded)
+    return True
+
+
+def save_if_valid(df: pd.DataFrame, save_dir: str, format: str, config: ChecksConfig) -> bool:
+    """Run checks; on success, save to disk and verify the round-trip."""
+    if not check_prices(df, config=config):
+        print("\n❌ Some checks failed, not saving the price data!")
+        return False
+    print("\n🎉 All checks passed, saving the price data...")
+    save_prices(df, save_dir=save_dir, format=format)
+    verify_saved_prices(df, save_dir=save_dir, format=format)
+    return True

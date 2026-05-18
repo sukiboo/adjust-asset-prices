@@ -10,29 +10,27 @@ from .schemas import ChecksConfig
 sns.set_theme(style="darkgrid", palette="muted", font="monospace", rc={"lines.linewidth": 2})
 
 
-def check_prices(df: pd.DataFrame, config: ChecksConfig = {}) -> bool:
+def check_prices(df: pd.DataFrame, config: ChecksConfig) -> bool:
     """Collection of sanity checks for the price data."""
     print(f"\n🔍 Checking {df.columns[0]} price data...")
     return all(
         [
             check_for_gaps(
                 df,
-                gap_threshold_mins=config.get("gap_threshold_mins", 1),
-                num_gaps_display=config.get("num_gaps_display", 10),
+                gap_threshold_mins=config["gap_threshold_mins"],
+                num_gaps_display=config["num_gaps_display"],
             ),
             compare_to_yf(
                 df,
-                diff_threshold_avg=config.get("diff_threshold_avg", 0.1),
-                diff_threshold_max=config.get("diff_threshold_max", 5.0),
-                show_plot=config.get("show_plot", True),
+                diff_threshold_avg=config["diff_threshold_avg"],
+                diff_threshold_max=config["diff_threshold_max"],
+                show_plot=config["show_plot"],
             ),
         ]
     )
 
 
-def check_for_gaps(
-    df: pd.DataFrame, gap_threshold_mins: int = 1, num_gaps_display: int = 10
-) -> bool:
+def check_for_gaps(df: pd.DataFrame, gap_threshold_mins: int, num_gaps_display: int) -> bool:
     """Check for gaps in the price data where adjacent timestamps are longer
     than `gap_threshold_mins` minutes apart.
     """
@@ -62,9 +60,9 @@ def check_for_gaps(
 
 def compare_to_yf(
     df: pd.DataFrame,
-    diff_threshold_avg: float = 0.1,
-    diff_threshold_max: float = 5.0,
-    show_plot: bool = True,
+    diff_threshold_avg: float,
+    diff_threshold_max: float,
+    show_plot: bool,
 ) -> bool:
     """Compare the price data to Yahoo Finance.
     Displays a plot of the price data and the difference between the two datasets.
@@ -85,7 +83,7 @@ def compare_to_yf(
     # Resample to daily using UTC day boundaries (last price before midnight UTC)
     our_daily = our_df[ticker].resample("D").last().dropna()
     # Convert to timezone-naive dates for comparison
-    our_daily.index = our_daily.index.tz_localize(None).normalize()
+    our_daily.index = our_daily.index.tz_localize(None).normalize()  # type: ignore[attr-defined]
 
     try:
         yf_df = yf.Ticker(ticker).history(start=start_date, end=end_date + pd.Timedelta(days=1))

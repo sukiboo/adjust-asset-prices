@@ -1,28 +1,24 @@
-from src import Prices, check_prices, load_prices, save_prices
-from src.schemas import ChecksConfig
+import argparse
 
-checks_config: ChecksConfig = {
-    "gap_threshold_mins": 1,
-    "num_gaps_display": 10,
-    "diff_threshold_avg": 0.1,
-    "diff_threshold_max": 5.0,
-    "show_plot": True,
-}
+from src import Prices, save_if_valid
+from src.constants import CHECKS_CONFIG
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Adjust raw asset prices for a single ticker.")
+    p.add_argument("ticker", help="Ticker symbol, e.g. BTC-USD")
+    p.add_argument("--format", choices=["parquet", "csv"], default="parquet")
+    p.add_argument("--date-start", default=None)
+    p.add_argument("--date-end", default=None)
+    p.add_argument("--data-dir", default="./data/files")
+    p.add_argument("--save-dir", default="./data/prices")
+    p.add_argument("--debug", action="store_true")
+    return p.parse_args()
 
 
 if __name__ == "__main__":
-    ticker = "BTC-USD"
-    format = "parquet"
-    date_start = None
-    date_end = None
+    args = parse_args()
 
-    prices = Prices(data_dir="./data/files", debug=True)
-    df = prices.get_prices(ticker=ticker, date_start=date_start, date_end=date_end)
-    if check_prices(df, config=checks_config):
-        print("\n🎉 All checks passed, saving the price data...")
-        save_prices(df, save_dir="./data/prices", format=format)
-    else:
-        print("\n❌ Some checks failed, not saving the price data!")
-
-    df = load_prices(f"{ticker}.{format}", load_dir="./data/prices")
-    print(df)
+    prices = Prices(data_dir=args.data_dir, debug=args.debug)
+    df = prices.get_prices(ticker=args.ticker, date_start=args.date_start, date_end=args.date_end)
+    save_if_valid(df, save_dir=args.save_dir, format=args.format, config=CHECKS_CONFIG)

@@ -31,7 +31,7 @@ ASSET_TYPE_CONFIG: dict[AssetType, dict[str, str]] = {
 DateLike = str | date | datetime | pd.Timestamp | None
 
 
-class ChecksConfig(TypedDict, total=False):
+class ChecksConfig(TypedDict):
     """Parameters for price data checks."""
 
     gap_threshold_mins: int
