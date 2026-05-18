@@ -36,6 +36,6 @@ class ChecksConfig(TypedDict):
 
     gap_threshold_mins: int
     num_gaps_display: int
-    diff_threshold_avg: float
-    diff_threshold_max: float
+    abs_rel_diff_pct_p50: float
+    abs_rel_diff_pct_p99: float
     show_plot: bool

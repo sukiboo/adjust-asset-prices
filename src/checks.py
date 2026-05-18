@@ -22,8 +22,8 @@ def check_prices(df: pd.DataFrame, config: ChecksConfig) -> bool:
             ),
             compare_to_yf(
                 df,
-                diff_threshold_avg=config["diff_threshold_avg"],
-                diff_threshold_max=config["diff_threshold_max"],
+                abs_rel_diff_pct_p50=config["abs_rel_diff_pct_p50"],
+                abs_rel_diff_pct_p99=config["abs_rel_diff_pct_p99"],
                 show_plot=config["show_plot"],
             ),
         ]
@@ -60,8 +60,8 @@ def check_for_gaps(df: pd.DataFrame, gap_threshold_mins: int, num_gaps_display: 
 
 def compare_to_yf(
     df: pd.DataFrame,
-    diff_threshold_avg: float,
-    diff_threshold_max: float,
+    abs_rel_diff_pct_p50: float,
+    abs_rel_diff_pct_p99: float,
     show_plot: bool,
 ) -> bool:
     """Compare the price data to Yahoo Finance.
@@ -106,22 +106,24 @@ def compare_to_yf(
             return False
 
         # Calculate differences
-        diff = comparison["our_close"] - comparison["yf_close"]
-        diff_pct = 100 * (diff / comparison["yf_close"])
+        diff_usd = comparison["our_close"] - comparison["yf_close"]
+        diff_pct = 100 * (diff_usd / comparison["yf_close"])
 
         # Print summary
-        avg_abs_diff = diff_pct.abs().mean()
-        max_abs_diff = diff_pct.abs().max()
-        if avg_abs_diff > diff_threshold_avg and max_abs_diff > diff_threshold_max:
+        p50_abs_diff = diff_pct.abs().median()
+        p99_abs_diff = diff_pct.abs().quantile(0.99)
+        if p50_abs_diff > abs_rel_diff_pct_p50 and p99_abs_diff > abs_rel_diff_pct_p99:
             status = "❗"
-        elif avg_abs_diff > 0.5 * diff_threshold_avg or max_abs_diff > 0.5 * diff_threshold_max:
+        elif p50_abs_diff > 0.5 * abs_rel_diff_pct_p50 or p99_abs_diff > 0.5 * abs_rel_diff_pct_p99:
             status = "❕"
         else:
             status = "✔️ "
+        p01_pct, p50_pct, p99_pct = diff_pct.quantile([0.01, 0.50, 0.99])
+        p01_usd, p50_usd, p99_usd = diff_usd.quantile([0.01, 0.50, 0.99])
         print(
-            f"{status} Price comparison over {len(comparison)} days (min/avg/max):"
-            f" {diff_pct.min():.2f}% / {diff_pct.mean():.2f}% / {diff_pct.max():.2f}%"
-            f" = ${diff.min():.2f} / ${diff.mean():.2f} / ${diff.max():.2f}"
+            f"{status} Price comparison over {len(comparison)} days (p01/p50/p99):"
+            f" {p01_pct:.3f}% / {p50_pct:.3f}% / {p99_pct:.3f}%"
+            f" = ${p01_usd:.2f} / ${p50_usd:.2f} / ${p99_usd:.2f}"
         )
 
         # Plot the price comparison
@@ -142,7 +144,7 @@ def compare_to_yf(
                 alpha=0.4,
                 label="Relative diff",
             )
-            ax2.set_ylim(-diff_threshold_max, diff_threshold_max)
+            ax2.set_ylim(-abs_rel_diff_pct_p99, abs_rel_diff_pct_p99)
             ax2.set_ylabel("Relative price difference (%)", color="red")
             ax2.grid(False)
             ax2.legend(loc="upper right")

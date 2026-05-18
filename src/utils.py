@@ -147,7 +147,7 @@ def save_prices(df: pd.DataFrame, save_dir: str = "./data/prices", format: str =
         df.to_parquet(save_path)
     else:
         raise ValueError(f"Invalid format: {format}, must be `csv` or `parquet`")
-    print(f"💾 Saved {ticker} prices to {save_path}")
+    print(f"📀 Saved {ticker} prices to {save_path}")
 
 
 def load_prices(file_name: str, load_dir: str = "./data/prices") -> pd.DataFrame:
@@ -188,7 +188,7 @@ def verify_saved_prices(df: pd.DataFrame, save_dir: str, format: str) -> bool:
     if not (values_match and index_match):
         print(f"❗ Saved file for {ticker} does not match in-memory data!")
         return False
-    print(f"✔️  Verified {ticker} round-trips cleanly through {format}")
+    print(f"💿 Successfully loaded {ticker} data through {format}")
     print(loaded)
     return True
 
