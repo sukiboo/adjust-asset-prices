@@ -5,7 +5,8 @@ import pandas as pd
 import seaborn as sns
 import yfinance as yf
 
-from .schemas import AssetType, ChecksConfig
+from .schemas import AssetType, ChecksConfig, PriceFileFormat
+from .utils import build_target_index, save_prices, verify_saved_prices
 
 sns.set_theme(style="darkgrid", palette="muted", font="monospace", rc={"lines.linewidth": 2})
 
@@ -13,50 +14,63 @@ sns.set_theme(style="darkgrid", palette="muted", font="monospace", rc={"lines.li
 def check_prices(df: pd.DataFrame, config: ChecksConfig, asset_type: AssetType) -> bool:
     """Collection of sanity checks for the price data."""
     print(f"\n🔍 Checking {df.columns[0]} price data...")
-    return all(
-        [
-            check_for_gaps(
-                df,
-                gap_threshold_mins=config["gap_threshold_mins"],
-                num_gaps_display=config["num_gaps_display"],
-            ),
-            compare_to_yf(
-                df,
-                asset_type=asset_type,
-                abs_rel_diff_pct_p50=config["abs_rel_diff_pct_p50"],
-                abs_rel_diff_pct_p99=config["abs_rel_diff_pct_p99"],
-                show_plot=config["show_plot"],
-            ),
-        ]
+    return (
+        _index_matches_calendar(df, asset_type)
+        and _prices_are_valid(df)
+        and compare_to_yf(
+            df,
+            asset_type=asset_type,
+            abs_rel_diff_pct_p50=config["abs_rel_diff_pct_p50"],
+            abs_rel_diff_pct_p99=config["abs_rel_diff_pct_p99"],
+            show_plot=config["show_plot"],
+        )
     )
 
 
-def check_for_gaps(df: pd.DataFrame, gap_threshold_mins: int, num_gaps_display: int) -> bool:
-    """Check for gaps in the price data where adjacent timestamps are longer
-    than `gap_threshold_mins` minutes apart.
+def save_if_valid(
+    df: pd.DataFrame,
+    save_dir: str,
+    format: PriceFileFormat,
+    config: ChecksConfig,
+    asset_type: AssetType,
+) -> bool:
+    """Run checks; on success, save to disk and verify the round-trip."""
+    if not check_prices(df, config=config, asset_type=asset_type):
+        print("\n❌ Some checks failed, not saving the price data!")
+        return False
+    print("\n🎉 All checks passed, saving the price data...")
+    save_prices(df, save_dir=save_dir, format=format)
+    verify_saved_prices(df, save_dir=save_dir, format=format)
+    return True
+
+
+def _index_matches_calendar(df: pd.DataFrame, asset_type: AssetType) -> bool:
+    """Verify df.index matches the calendar-aware target index for this asset type."""
+    ticker = df.columns[0]
+    expected_index = build_target_index(
+        cast(pd.Timestamp, df.index[0]), cast(pd.Timestamp, df.index[-1]), asset_type
+    )
+    if not df.index.equals(expected_index):
+        print(
+            f"❗ {ticker} index does not match expected calendar: "
+            f"{len(df)} rows vs {len(expected_index)} expected"
+        )
+        return False
+    print(f"✔️  {ticker} index matches expected calendar")
+    return True
+
+
+def _prices_are_valid(df: pd.DataFrame) -> bool:
+    """Verify every price is finite and strictly positive (NaN > 0 is False, so this
+    also catches any missed NaN from the backfill).
     """
-    time_diffs = df.index.to_series().diff()
-    gap_mask = time_diffs > pd.Timedelta(minutes=gap_threshold_mins)
-    gaps_series = cast(pd.Series, time_diffs[gap_mask])
-
-    if len(gaps_series) == 0:
-        print("✔️  No gaps found in the price data")
-        return True
-
-    gap_info = []
-    for gap_end in gaps_series.index:
-        gap_duration = gaps_series.loc[gap_end]
-        gap_start = gap_end - gap_duration
-        gap_info.append({"gap_start": gap_start, "gap_end": gap_end, "gap_duration": gap_duration})
-
-    gap_df = pd.DataFrame(gap_info)
-    gap_df = gap_df.sort_values("gap_duration", ascending=False).head(num_gaps_display)
-
-    print(f"❗ Found {len(gaps_series)} gaps larger than {gap_threshold_mins} minutes:")
-    for idx, row in gap_df.iterrows():
-        print(f"{row['gap_duration']}: {row['gap_start']} -> {row['gap_end']}")
-
-    return False
+    ticker = df.columns[0]
+    if not (df[ticker] > 0).all():
+        n_bad = int((~(df[ticker] > 0)).sum())
+        print(f"❗ {ticker} contains {n_bad} invalid prices (NaN or non-positive)")
+        return False
+    print(f"✔️  {ticker} contains only valid prices")
+    return True
 
 
 def compare_to_yf(
@@ -138,7 +152,7 @@ def compare_to_yf(
 
         # Plot the price comparison
         if show_plot:
-            fig, ax1 = plt.subplots(figsize=(12, 6))
+            _, ax1 = plt.subplots(figsize=(12, 6))
             ax1.plot(comparison.index, comparison["our_close"], alpha=0.9, label="Adjusted prices")
             ax1.plot(comparison.index, comparison["yf_close"], alpha=0.9, label="Yahoo Finance")
             ax1.set_xlabel("Date")

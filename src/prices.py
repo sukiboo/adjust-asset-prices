@@ -5,6 +5,7 @@ import pandas as pd
 
 from .schemas import AssetType
 from .utils import (
+    build_target_index,
     check_data_dir,
     fetch_dividends,
     fetch_splits,
@@ -67,18 +68,24 @@ class Prices:
         3. Adjust for dividends
         """
         print(f"⚙️  Adjusting {df.columns[0]} price data...")
-        df = self.backfill_prices(df)
+        df = self.backfill_prices(df, asset_type)
         df = self.adjust_splits(df, asset_type)
         df = self.adjust_dividends(df, asset_type)
         return df
 
-    def backfill_prices(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Backfill the missing price values and fill in missing rows.
-        Creates a complete 1-minute timestamp range from the first to last timestamp,
-        then uses exponential interpolation to fill in gaps via log -> linear interpolate -> exp
+    def backfill_prices(self, df: pd.DataFrame, asset_type: AssetType) -> pd.DataFrame:
+        """Backfill missing 1-minute rows over the appropriate trading calendar.
+        Stocks use NYSE extended hours (04:00-19:59 ET on session days); options use NYSE
+        regular hours (09:30-15:59 ET on session days). Half-days are handled by the
+        calendar. Crypto and forex use a continuous 1-min grid. Interpolation runs in log
+        space (log -> linear interpolate -> exp) to preserve multiplicative behavior.
         """
         col, num_rows = df.columns[0], len(df)
-        df = df.reindex(pd.date_range(start=df.index[0], end=df.index[-1], freq="1min"))
+        target_index = build_target_index(
+            cast(pd.Timestamp, df.index[0]), cast(pd.Timestamp, df.index[-1]), asset_type
+        )
+        df = df.reindex(target_index)
+        assert df.index.equals(target_index), "backfill produced unexpected index"
         df[col] = df[col].apply(np.log).interpolate(method="linear").apply(np.exp).ffill().bfill()
         if self.debug and len(df) > num_rows:
             print(f"🔧 Backfilled {len(df) - num_rows:,} new rows")

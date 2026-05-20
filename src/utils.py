@@ -5,14 +5,13 @@ from typing import Tuple, cast
 
 import numpy as np
 import pandas as pd
+import pandas_market_calendars as mcal
 import yfinance as yf
 
-from .checks import check_prices
 from .schemas import (
     ASSET_TYPE_CONFIG,
     ASSET_TYPES,
     AssetType,
-    ChecksConfig,
     DateLike,
     PriceFileFormat,
 )
@@ -65,6 +64,34 @@ def parse_date(date_input: DateLike = None, default: DateLike = None) -> date:
         if isinstance(date_input, str):
             return datetime.strptime(date_input, "%Y-%m-%d").date()
         raise
+
+
+def build_target_index(
+    start: pd.Timestamp, end: pd.Timestamp, asset_type: AssetType
+) -> pd.DatetimeIndex:
+    """Return the expected 1-min timestamp index for an asset type over [start, end].
+    Crypto/forex use a continuous grid; stocks use NYSE extended hours (04:00-19:59 ET);
+    options use NYSE regular hours (09:30-15:59 ET). Half-days come from the calendar.
+    """
+    if asset_type in (AssetType.CRYPTO, AssetType.FOREX):
+        return pd.date_range(start=start, end=end, freq="1min")
+
+    nyse = mcal.get_calendar("NYSE")
+    if asset_type == AssetType.STOCKS:
+        sched = nyse.schedule(
+            start_date=start.date(), end_date=end.date(), market_times=["pre", "post"]
+        )
+    elif asset_type == AssetType.OPTIONS:
+        sched = nyse.schedule(start_date=start.date(), end_date=end.date())
+    else:
+        raise ValueError(f"Unsupported asset type: {asset_type}")
+
+    if sched.empty:
+        raise ValueError(
+            f"No NYSE sessions for {asset_type} between {start.date()} and {end.date()}"
+        )
+    idx = mcal.date_range(sched, frequency="1min", closed="left", force_close=False)
+    return cast(pd.DatetimeIndex, idx[(idx >= start) & (idx <= end)])
 
 
 def get_files_in_range(data_dir: Path, asset_type: str, start: date, end: date) -> list[Path]:
@@ -251,21 +278,4 @@ def verify_saved_prices(df: pd.DataFrame, save_dir: str, format: PriceFileFormat
         return False
     print(f"💿 Successfully loaded {ticker} data through {format}")
     print(loaded)
-    return True
-
-
-def save_if_valid(
-    df: pd.DataFrame,
-    save_dir: str,
-    format: PriceFileFormat,
-    config: ChecksConfig,
-    asset_type: AssetType,
-) -> bool:
-    """Run checks; on success, save to disk and verify the round-trip."""
-    if not check_prices(df, config=config, asset_type=asset_type):
-        print("\n❌ Some checks failed, not saving the price data!")
-        return False
-    print("\n🎉 All checks passed, saving the price data...")
-    save_prices(df, save_dir=save_dir, format=format)
-    verify_saved_prices(df, save_dir=save_dir, format=format)
     return True

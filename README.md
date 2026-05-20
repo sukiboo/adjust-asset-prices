@@ -53,6 +53,21 @@ python main.py SPY --format csv --date-start 2024-01-01
   convention), so a saved file is a snapshot — re-run if new distributions are announced
   after the fact. Options inherit split metadata at the contract level and are not
   back-adjusted here; non-stock asset types are passed through as-is.
+- **Options pipeline is partially complete.** Loading, RTH-aware backfilling
+  (`[09:30, 15:59]` ET via NYSE calendar), and the correct skip of split/dividend
+  adjustment (options are contract-adjusted by the OCC, not price-adjusted) all work.
+  However, the quality-check gate (`compare_to_yf`) has no usable data source for
+  individual OSI contracts — yfinance only exposes current option chains, not historical
+  per-contract time series — so `python main.py <option_ticker>` will currently fail at
+  the check step and not save. Remaining work: parse the OSI symbol to enable expiry
+  pruning at load time and replace the yfinance gate with a structural bounds check
+  (price ≥ 0, calls ≤ underlying, puts ≤ strike, no bars after expiry). Also note that
+  index/ETF options with extended 16:15 ET close (SPX, SPXW, SPY, QQQ, IWM, ...) have
+  their 16:00-16:14 ET bars dropped on reindex by design — `[09:30, 15:59]` is correct
+  for vanilla equity contracts and trades cleanness for those at the cost of partial
+  data for the extended-close products.
+- **Stocks** include extended-hours bars (`[04:00, 19:59]` ET via NYSE pre/post session
+  bounds), matching Polygon's emission exactly.
 - **Hard forks are not adjusted for.** When a chain splits (e.g. BCH from BTC, ETC from
   ETH), pre-fork prices of the surviving ticker are technically inflated by the value of
   the spun-off coin, analogously to a stock split. The pipeline does not currently

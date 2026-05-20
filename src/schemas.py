@@ -36,8 +36,6 @@ DateLike = str | date | datetime | pd.Timestamp | None
 class ChecksConfig(TypedDict):
     """Parameters for price data checks."""
 
-    gap_threshold_mins: int
-    num_gaps_display: int
     abs_rel_diff_pct_p50: float
     abs_rel_diff_pct_p99: float
     show_plot: bool
