@@ -1,7 +1,7 @@
 import os
 from datetime import date, datetime
 from pathlib import Path
-from typing import Tuple, cast
+from typing import Literal, Tuple, cast
 
 import numpy as np
 import pandas as pd
@@ -79,10 +79,14 @@ def build_target_index(
     nyse = mcal.get_calendar("NYSE")
     if asset_type == AssetType.STOCKS:
         sched = nyse.schedule(
-            start_date=start.date(), end_date=end.date(), market_times=["pre", "post"]
+            start_date=start.date(),
+            end_date=end.date(),
+            market_times=["pre", "market_open", "market_close", "post"],
         )
+        sessions: set[Literal["pre", "RTH", "post"]] = {"pre", "RTH", "post"}
     elif asset_type == AssetType.OPTIONS:
         sched = nyse.schedule(start_date=start.date(), end_date=end.date())
+        sessions = {"RTH"}
     else:
         raise ValueError(f"Unsupported asset type: {asset_type}")
 
@@ -90,7 +94,9 @@ def build_target_index(
         raise ValueError(
             f"No NYSE sessions for {asset_type} between {start.date()} and {end.date()}"
         )
-    idx = mcal.date_range(sched, frequency="1min", closed="left", force_close=False)
+    idx = mcal.date_range(
+        sched, frequency="1min", closed="left", force_close=False, session=sessions
+    )
     return cast(pd.DatetimeIndex, idx[(idx >= start) & (idx <= end)])
 
 
