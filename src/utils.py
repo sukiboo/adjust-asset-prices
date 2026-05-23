@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import date, datetime
 from pathlib import Path
 from typing import Literal, Tuple, cast
@@ -13,6 +14,7 @@ from .schemas import (
     ASSET_TYPES,
     AssetType,
     DateLike,
+    OSIContract,
     PriceFileFormat,
 )
 
@@ -147,6 +149,39 @@ def normalize_ticker(ticker: str, asset_type: AssetType) -> str:
     return f"{prefix}{ticker}" if prefix and not ticker.startswith(prefix) else ticker
 
 
+def parse_osi_ticker(ticker: str) -> OSIContract:
+    """Parse an OSI option ticker into (underlying, expiry, option_type, strike).
+    Accepts either the Polygon-prefixed form (`O:SPY240315C00400000`) or unprefixed
+    (`SPY240315C00400000`). Layout: variable-length root, then YYMMDD (always 20YY —
+    OSI is post-2010), then `C`/`P`, then 8-digit strike scaled by 1000. Parses from
+    the right so the variable-length root is unambiguous (1 to 6+ chars in practice).
+    """
+    body = ticker[2:] if ticker.startswith("O:") else ticker
+    if len(body) < 16:
+        raise ValueError(f"OSI ticker too short to parse: `{ticker}`")
+    else:
+        underlying = body[:-15]
+        yy, mm, dd = body[-15:-13], body[-13:-11], body[-11:-9]
+        option_char, strike_str = body[-9], body[-8:]
+
+    if not (yy.isdigit() and mm.isdigit() and dd.isdigit() and strike_str.isdigit()):
+        raise ValueError(f"Non-numeric expiry or strike in OSI ticker: `{ticker}`")
+    if option_char not in ("C", "P"):
+        raise ValueError(f"Expected `C` or `P`, got `{option_char}` in OSI ticker: `{ticker}`")
+
+    try:
+        expiry = date(2000 + int(yy), int(mm), int(dd))
+    except ValueError as e:
+        raise ValueError(f"Invalid expiry date in OSI ticker: `{ticker}`") from e
+
+    return OSIContract(
+        underlying=underlying,
+        expiry=expiry,
+        option_type=cast(Literal["C", "P"], option_char),
+        strike=int(strike_str) / 1000,
+    )
+
+
 def determine_asset_type(
     data_dir: Path,
     asset_types: list[str],
@@ -176,6 +211,53 @@ def determine_asset_type(
             continue
 
     raise ValueError(f"Could not determine asset type for ticker: `{ticker}`")
+
+
+def load_options_data(
+    data_dir: Path,
+    underlying: str,
+    date_start: str | None = None,
+    date_end: str | None = None,
+) -> pd.DataFrame:
+    """Load raw option bars for every contract on `underlying` over [date_start, date_end].
+    Per-file pipeline: tight prefix prefilter (`^O:<underlying>\\d` — narrow enough to
+    avoid the 1-char-root pathology where bare `O:A` would catch every A-prefixed
+    underlying) then exact confirmation via `parse_osi_ticker(t).underlying == underlying`
+    on the unique survivors (rules out e.g. `O:SPYG…` when underlying is `SPY`). Returns
+    flat raw rows (raw schema preserved); reshaping into multi-indexed calls/puts frames
+    is the caller's job.
+    """
+    start = parse_date(date_start, "2000-01-01")
+    end = parse_date(date_end, datetime.now().date().strftime("%Y-%m-%d"))
+    files_in_range = get_files_in_range(data_dir, AssetType.OPTIONS, start, end)
+    if not files_in_range:
+        raise ValueError(f"No options files in range {start}..{end}")
+
+    prefilter = rf"O:{re.escape(underlying)}\d"
+    dfs = []
+    for file_path in files_in_range:
+        try:
+            df = pd.read_csv(
+                file_path, compression="gzip", engine="pyarrow", dtype_backend="pyarrow"
+            )
+        except Exception:
+            df = pd.read_csv(file_path, compression="gzip")
+
+        candidates = df[df["ticker"].str.match(prefilter, na=False)]
+        if candidates.empty:
+            continue
+        matching = {
+            t for t in candidates["ticker"].unique() if parse_osi_ticker(t).underlying == underlying
+        }
+        if not matching:
+            continue
+        dfs.append(candidates[candidates["ticker"].isin(matching)])
+
+    if not dfs:
+        raise ValueError(
+            f"No option contracts found for underlying `{underlying}` in {start}..{end}"
+        )
+    return pd.concat(dfs, ignore_index=True)
 
 
 def load_ticker_data(

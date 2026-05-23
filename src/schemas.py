@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Literal, TypedDict
+from typing import Literal, NamedTuple, TypedDict
 
 import pandas as pd
 
@@ -38,3 +38,15 @@ class ChecksConfig(TypedDict):
 
     abs_rel_diff_pct_p50: float
     abs_rel_diff_pct_p99: float
+
+
+class OSIContract(NamedTuple):
+    """Parsed OSI (Options Symbology Initiative) option ticker components.
+    Underlying is the root symbol as emitted by Polygon (no yfinance normalization);
+    strike is in dollars (raw 8-digit field divided by 1000).
+    """
+
+    underlying: str
+    expiry: date
+    option_type: Literal["C", "P"]
+    strike: float

@@ -10,8 +10,10 @@ from .utils import (
     fetch_dividends,
     fetch_splits,
     fetch_yf_closes,
+    load_options_data,
     load_ticker_data,
     parse_date,
+    parse_osi_ticker,
     resolve_index_bound,
 )
 
@@ -60,6 +62,42 @@ class Prices:
             )
 
         return df, asset_type
+
+    def load_options(
+        self, underlying: str, date_start: str | None = None, date_end: str | None = None
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Load raw option bars for all contracts on `underlying` in the date range,
+        partitioned into (calls, puts). Each frame is multi-indexed on
+        `(timestamp_utc, ticker)` with a single `close` column. Either side may be
+        empty if the underlying only had calls (or only puts) in range.
+        Backfill / adjustment / gating are deliberately downstream — this method is
+        I/O + reshape only.
+        """
+        print(f"⛏️  Loading options for {underlying}...")
+        df = load_options_data(self.data_dir, underlying, date_start, date_end)
+        df["timestamp_utc"] = pd.to_datetime(df["window_start"], unit="ns", utc=True)
+        df = df[["timestamp_utc", "ticker", "close"]]
+
+        contract_type = {t: parse_osi_ticker(t).option_type for t in df["ticker"].unique()}
+        is_call = df["ticker"].map(contract_type) == "C"
+        calls = (
+            df[is_call]
+            .sort_values(["timestamp_utc", "ticker"])
+            .set_index(["timestamp_utc", "ticker"])
+        )
+        puts = (
+            df[~is_call]
+            .sort_values(["timestamp_utc", "ticker"])
+            .set_index(["timestamp_utc", "ticker"])
+        )
+
+        if self.debug:
+            n_calls = calls.index.get_level_values("ticker").nunique() if not calls.empty else 0
+            n_puts = puts.index.get_level_values("ticker").nunique() if not puts.empty else 0
+            print(f"🗑️  Loaded {len(calls):,} call bars across {n_calls:,} contracts")
+            print(f"🗑️  Loaded {len(puts):,} put bars across {n_puts:,} contracts")
+
+        return calls, puts
 
     def adjust_prices(
         self,
