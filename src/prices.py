@@ -1,15 +1,17 @@
+from datetime import date
 from typing import cast
 
 import numpy as np
 import pandas as pd
 
-from .schemas import AssetType
+from .schemas import AssetType, OSIContract
 from .utils import (
     build_target_index,
     check_data_dir,
     fetch_dividends,
     fetch_splits,
     fetch_yf_closes,
+    format_osi_ticker,
     load_options_data,
     load_ticker_data,
     parse_date,
@@ -98,6 +100,177 @@ class Prices:
             print(f"🗑️  Loaded {len(puts):,} put bars across {n_puts:,} contracts")
 
         return calls, puts
+
+    def backfill_options(
+        self, calls: pd.DataFrame, puts: pd.DataFrame
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Backfill each contract independently onto its own RTH window:
+        `[first_bar.date(), min(last_bar.date(), expiry)]`. No global window — contracts
+        have different lifetimes, and synthesizing prices before a contract listed or
+        after it expired would be fabrication. Log-linear interpolation with ffill/bfill
+        on the edges, same as the single-ticker path. Post-expiry raw bars (upstream
+        bugs) are silently dropped via the `min(..., expiry)` cap; a hard assertion
+        belongs in the structural gate, not here.
+        """
+        print("⚙️  Backfilling options contracts...")
+        return self._backfill_contracts(calls), self._backfill_contracts(puts)
+
+    def _backfill_contracts(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty:
+            return df
+
+        backfilled = []
+        for ticker, group in df.groupby(level="ticker", sort=False):
+            series = group.droplevel("ticker")["close"]
+            expiry = parse_osi_ticker(cast(str, ticker)).expiry
+            first_date = cast(pd.Timestamp, series.index[0]).tz_convert("America/New_York").date()
+            last_date = cast(pd.Timestamp, series.index[-1]).tz_convert("America/New_York").date()
+            end_date = min(last_date, expiry)
+            target_index = build_target_index(
+                pd.Timestamp(first_date), pd.Timestamp(end_date), AssetType.OPTIONS
+            )
+            reindexed = series.reindex(target_index)
+            log_interp = cast(pd.Series, np.log(reindexed)).interpolate(method="linear")
+            filled = cast(pd.Series, np.exp(log_interp)).ffill().bfill()
+            filled.index = pd.MultiIndex.from_product(
+                [target_index, [ticker]], names=["timestamp_utc", "ticker"]
+            )
+            backfilled.append(filled.to_frame("close"))
+
+        result = pd.concat(backfilled).sort_index()
+        if self.debug:
+            n_contracts = result.index.get_level_values("ticker").nunique()
+            print(f"🔧 Backfilled to {len(result):,} rows across {n_contracts:,} contracts")
+        return result
+
+    def adjust_options_splits(
+        self, calls: pd.DataFrame, puts: pd.DataFrame, underlying: str
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Unify pre-split contract symbols with their post-split successors and scale
+        pre-split premiums into post-split currency — the options analog of the stocks
+        split adjustment. For each split (chronological) on `underlying`: for every
+        ticker with bars before split_date AND expiry >= split_date.date(), compute
+        the OCC-adjusted successor symbol (strike / ratio), divide pre-split bars by
+        ratio, and relabel them under the successor. Pre-split rows then merge by
+        index with any natively-post-split-issued contract at the same successor
+        symbol, producing one continuous series.
+
+        Non-clean strikes (e.g. 3:2 splits producing fractional cents) are skipped per
+        contract with a debug warning — OCC's numeric-suffix root convention for
+        non-standard adjustments is not predictable from yfinance metadata.
+        """
+        if calls.empty and puts.empty:
+            return calls, puts
+
+        starts = [
+            cast(pd.Timestamp, df.index.get_level_values("timestamp_utc").min())
+            for df in (calls, puts)
+            if not df.empty
+        ]
+        splits = fetch_splits(underlying, min(starts))
+        if splits.empty:
+            if self.debug:
+                print(f"🪚  No splits to apply for {underlying}")
+            return calls, puts
+        splits = splits.sort_index()
+        return (
+            self._unify_split_symbols(calls, splits, underlying),
+            self._unify_split_symbols(puts, splits, underlying),
+        )
+
+    def _unify_split_symbols(
+        self, df: pd.DataFrame, splits: pd.Series, underlying: str
+    ) -> pd.DataFrame:
+        if df.empty:
+            return df
+        df = df.copy()
+        for split_ts, ratio in splits.items():
+            split_ts_cast = cast(pd.Timestamp, split_ts)
+            split_date = split_ts_cast.date()
+            ts_level = df.index.get_level_values("timestamp_utc")
+            ticker_level = df.index.get_level_values("ticker")
+            pre_mask = ts_level < split_ts_cast
+            if not pre_mask.any():
+                continue
+
+            # Index suffixed-root post-split candidates by (expiry, type) for the non-clean
+            # match path. Only contracts with bars on/after this split's date are eligible;
+            # standard-root (no suffix) tickers aren't candidates here — those merge via the
+            # clean strike-division path.
+            post_mask = ts_level >= split_ts_cast
+            suffixed_candidates: dict[tuple[date, str], list[tuple[str, float]]] = {}
+            for t in ticker_level[post_mask].unique():
+                parsed = parse_osi_ticker(cast(str, t))
+                if parsed.underlying == underlying:
+                    continue
+                suffix = parsed.underlying[len(underlying) :]
+                if not (parsed.underlying.startswith(underlying) and suffix.isdigit()):
+                    continue
+                key = (parsed.expiry, parsed.option_type)
+                suffixed_candidates.setdefault(key, []).append((cast(str, t), parsed.strike))
+
+            rewrites: dict[str, str] = {}
+            for t in ticker_level[pre_mask].unique():
+                parsed = parse_osi_ticker(cast(str, t))
+                if parsed.expiry < split_date:
+                    continue  # expired before split — OCC didn't touch it
+                if parsed.underlying != underlying:
+                    continue  # already a suffixed-root; don't re-rewrite at this split
+                new_strike = parsed.strike / ratio
+                if abs(new_strike * 1000 - round(new_strike * 1000)) < 1e-6:
+                    # Clean: compute successor symbol directly
+                    rewrites[cast(str, t)] = format_osi_ticker(
+                        OSIContract(
+                            parsed.underlying, parsed.expiry, parsed.option_type, new_strike
+                        )
+                    )
+                    continue
+                # Non-clean: search for OCC's suffixed-root successor in the data
+                candidates = suffixed_candidates.get((parsed.expiry, parsed.option_type), [])
+                if not candidates:
+                    if self.debug:
+                        print(
+                            f"⚠️  No suffixed-root candidate for {t} ({ratio:g}-for-1 "
+                            f"on {split_date}): target ${new_strike:.4f}, "
+                            f"no post-split contracts at same expiry/type"
+                        )
+                    continue
+                best_ticker, best_strike = min(candidates, key=lambda c: abs(c[1] - new_strike))
+                if abs(best_strike - new_strike) > 0.01:  # > 1¢: not the same OCC adjustment
+                    if self.debug:
+                        print(
+                            f"⚠️  No close strike for {t} ({ratio:g}-for-1 on {split_date}): "
+                            f"target ${new_strike:.4f}, closest ${best_strike:.4f}"
+                        )
+                    continue
+                rewrites[cast(str, t)] = best_ticker
+                if self.debug:
+                    print(
+                        f"🔗  Suffix-match: {t} → {best_ticker} "
+                        f"(${parsed.strike} ÷ {ratio:g} ≈ ${new_strike:.4f} ≈ ${best_strike})"
+                    )
+
+            if not rewrites:
+                continue
+
+            rewrite_mask = pre_mask & ticker_level.isin(rewrites.keys())
+            untouched = df[~rewrite_mask]
+            to_rewrite = df[rewrite_mask].copy()
+            to_rewrite["close"] /= ratio
+            to_rewrite.index = pd.MultiIndex.from_arrays(
+                [
+                    to_rewrite.index.get_level_values("timestamp_utc"),
+                    to_rewrite.index.get_level_values("ticker").map(rewrites),
+                ],
+                names=["timestamp_utc", "ticker"],
+            )
+            df = pd.concat([untouched, to_rewrite]).sort_index()
+            if self.debug:
+                print(
+                    f"🪚  {ratio:g}-for-1 split on {split_date}: "
+                    f"rewrote {len(rewrites)} contracts, {int(rewrite_mask.sum()):,} rows"
+                )
+        return df
 
     def adjust_prices(
         self,

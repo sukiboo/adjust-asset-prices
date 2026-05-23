@@ -182,6 +182,34 @@ def parse_osi_ticker(ticker: str) -> OSIContract:
     )
 
 
+def underlying_matches(parsed_underlying: str, target: str) -> bool:
+    """Match a parsed OSI underlying to `target`, allowing OCC numeric-suffix roots
+    (e.g. target=`AAPL` matches `AAPL`, `AAPL1`, `AAPL7`, …). Used by the loader to
+    bundle OCC-adjusted suffixed-root contracts under the user-facing underlying.
+    """
+    if parsed_underlying == target:
+        return True
+    if parsed_underlying.startswith(target):
+        suffix = parsed_underlying[len(target) :]
+        return bool(suffix) and suffix.isdigit()
+    return False
+
+
+def format_osi_ticker(contract: OSIContract) -> str:
+    """Inverse of `parse_osi_ticker` — reconstruct the Polygon-prefixed OSI symbol.
+    Strike is rounded to the nearest 1/1000 dollar (OSI's native precision); callers
+    that need to verify a strike divides cleanly under a corporate-action ratio should
+    check that themselves before calling.
+    """
+    yy = contract.expiry.year % 100
+    strike_milli = round(contract.strike * 1000)
+    return (
+        f"O:{contract.underlying}"
+        f"{yy:02d}{contract.expiry.month:02d}{contract.expiry.day:02d}"
+        f"{contract.option_type}{strike_milli:08d}"
+    )
+
+
 def determine_asset_type(
     data_dir: Path,
     asset_types: list[str],
@@ -247,7 +275,9 @@ def load_options_data(
         if candidates.empty:
             continue
         matching = {
-            t for t in candidates["ticker"].unique() if parse_osi_ticker(t).underlying == underlying
+            t
+            for t in candidates["ticker"].unique()
+            if underlying_matches(parse_osi_ticker(t).underlying, underlying)
         }
         if not matching:
             continue
