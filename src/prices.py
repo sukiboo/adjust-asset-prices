@@ -117,12 +117,17 @@ class Prices:
         self, calls: pd.DataFrame, puts: pd.DataFrame
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
         """Backfill each contract independently onto its own RTH window:
-        `[first_bar.date(), min(last_bar.date(), expiry)]`. No global window — contracts
-        have different lifetimes, and synthesizing prices before a contract listed or
-        after it expired would be fabrication. Log-linear interpolation with ffill/bfill
-        on the edges, same as the single-ticker path. Post-expiry raw bars (upstream
-        bugs) are silently dropped via the `min(..., expiry)` cap; a hard assertion
-        belongs in the structural gate, not here.
+        `[first_bar.date(), min(expiry, data_window_end)]`. The end runs to expiry, not
+        to last trade, so a contract that stops printing before expiry is held flat
+        (ffill) to expiry instead of vanishing mid-life — the holder still owns it, and
+        a gap would otherwise read as a delisting. This matters across splits: an
+        OCC-adjusted contract with no post-split trades (e.g. a pre-split strike
+        re-struck to a thin post-split strike) would otherwise stop dead at the split
+        rather than spanning it. Capped at the loaded data window's last date when
+        expiry falls beyond it, since we have no market context past the data we loaded.
+        The start stays at first_bar — we don't fabricate pre-listing history. Log-linear
+        interpolation on interior gaps, ffill/bfill on the edges. Post-expiry raw bars
+        (upstream bugs) are still dropped via the `min(..., expiry)` cap.
         """
         print("⚙️  Backfilling options contracts...")
         return self._backfill_contracts(calls), self._backfill_contracts(puts)
@@ -131,16 +136,31 @@ class Prices:
         if df.empty:
             return df
 
+        # Pre-build one full RTH 1-min target index over the loaded data window so the
+        # per-contract path becomes an O(log n) searchsorted slice instead of a fresh
+        # mcal.schedule call. The per-contract mcal.schedule (~10-30ms each) was the
+        # dominant cost; for busy underlyings (NVDA-style, 10k+ contracts) this turns
+        # 20-min runs into ~10s.
+        ts_level = cast(pd.DatetimeIndex, df.index.get_level_values("timestamp_utc"))
+        window_start = cast(pd.Timestamp, ts_level.min()).tz_convert("America/New_York")
+        window_end = cast(pd.Timestamp, ts_level.max()).tz_convert("America/New_York")
+        window_end_date = window_end.date()
+        full_index = build_target_index(window_start, window_end, AssetType.OPTIONS)
+        full_et = cast(pd.DatetimeIndex, full_index.tz_convert("America/New_York"))
+
         backfilled = []
         for ticker, group in df.groupby(level="ticker", sort=False):
             series = group.droplevel("ticker")["close"]
             expiry = parse_osi_ticker(cast(str, ticker)).expiry
             first_date = cast(pd.Timestamp, series.index[0]).tz_convert("America/New_York").date()
-            last_date = cast(pd.Timestamp, series.index[-1]).tz_convert("America/New_York").date()
-            end_date = min(last_date, expiry)
-            target_index = build_target_index(
-                pd.Timestamp(first_date), pd.Timestamp(end_date), AssetType.OPTIONS
-            )
+            end_date = min(expiry, window_end_date)
+            if end_date < first_date:
+                continue  # contract first prints after expiry — upstream bug, drop
+            start_ts = pd.Timestamp(first_date, tz="America/New_York")
+            end_ts = pd.Timestamp(end_date, tz="America/New_York") + pd.Timedelta(days=1)
+            start_idx = full_et.searchsorted(start_ts, side="left")
+            end_idx = full_et.searchsorted(end_ts, side="left")
+            target_index = full_index[start_idx:end_idx]
             reindexed = series.reindex(target_index)
             log_interp = cast(pd.Series, np.log(reindexed)).interpolate(method="linear")
             filled = cast(pd.Series, np.exp(log_interp)).ffill().bfill()
@@ -158,14 +178,17 @@ class Prices:
     def adjust_options_splits(
         self, calls: pd.DataFrame, puts: pd.DataFrame, underlying: str
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """Unify pre-split contract symbols with their post-split successors and scale
-        pre-split premiums into post-split currency — the options analog of the stocks
-        split adjustment. For each split (chronological) on `underlying`: for every
-        ticker with bars before split_date AND expiry >= split_date.date(), compute
-        the OCC-adjusted successor symbol (strike / ratio), divide pre-split bars by
-        ratio, and relabel them under the successor. Pre-split rows then merge by
-        index with any natively-post-split-issued contract at the same successor
-        symbol, producing one continuous series.
+        """Scale every pre-split premium into post-split currency and rewrite its symbol
+        to the split-adjusted strike — the options analog of the stocks split adjustment.
+        For each split (chronological) on `underlying`, for every ticker with bars before
+        split_date: divide pre-split bars by ratio and relabel under the strike/ratio
+        successor symbol. Contracts that span the split merge by index with the natively-
+        post-split-issued contract at the same successor symbol, producing one continuous
+        series; contracts that expired before the split have no successor and stand alone
+        (a synthetic split-adjusted strike that never traded, like back-adjusted stock
+        prices). All pre-split contracts are adjusted regardless of expiry so the output
+        is in uniform post-split currency — leaving expired-before-split contracts in
+        pre-split currency breaks the structural gate's underlying comparison.
 
         Only handles ratios that are integers (forward splits like 2:1, 7:1, 10:1) or
         1/integer (reverse splits like 1:8, 1:20). Other ratios in yfinance.splits are
@@ -234,20 +257,25 @@ class Prices:
             rewrites: dict[str, str] = {}
             for t in ticker_level[pre_mask].unique():
                 parsed = parse_osi_ticker(cast(str, t))
-                if parsed.expiry < split_date:
-                    continue  # expired before split — OCC didn't touch it
                 if parsed.underlying != underlying:
                     continue  # already a suffixed-root; don't re-rewrite at this split
                 new_strike = parsed.strike / ratio
-                if abs(new_strike * 1000 - round(new_strike * 1000)) < 1e-6:
-                    # Clean: compute successor symbol directly
+                clean = abs(new_strike * 1000 - round(new_strike * 1000)) < 1e-6
+                # Clean strikes resolve to their successor symbol directly. So do
+                # contracts that expired before the split: OCC never issued a successor
+                # for them, so there's nothing to match/merge — they become standalone
+                # split-adjusted series with a synthetic strike that never traded, exactly
+                # as back-adjusted stock prices carry synthetic pre-split values. (A
+                # non-clean expired strike rounds to OSI's native milli resolution.)
+                if clean or parsed.expiry < split_date:
                     rewrites[cast(str, t)] = format_osi_ticker(
                         OSIContract(
                             parsed.underlying, parsed.expiry, parsed.option_type, new_strike
                         )
                     )
                     continue
-                # Non-clean: search for OCC's suffixed-root successor in the data
+                # Non-clean AND spanning the split: match OCC's suffixed-root successor
+                # in the data (the real adjusted contract we want to merge with).
                 candidates = suffixed_candidates.get((parsed.expiry, parsed.option_type), [])
                 if not candidates:
                     if self.debug:

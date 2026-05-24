@@ -1,12 +1,20 @@
 from typing import cast
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import seaborn as sns
 import yfinance as yf
 
-from .schemas import AssetType, ChecksConfig, PriceFileFormat
-from .utils import build_target_index, save_prices, verify_saved_prices
+from .schemas import AssetType, ChecksConfig, OptionsChecksConfig, PriceFileFormat
+from .utils import (
+    build_target_index,
+    parse_osi_ticker,
+    save_options,
+    save_prices,
+    verify_saved_options,
+    verify_saved_prices,
+)
 
 sns.set_theme(style="darkgrid", palette="muted", font="monospace", rc={"lines.linewidth": 2})
 
@@ -217,7 +225,7 @@ def _diff_passes_thresholds(
         f" = ${p01_usd:.2f} / ${p50_usd:.2f} / ${p99_usd:.2f}"
     )
     if fail:
-        msg = " and ".join(f"{n} = {v:.2f}% > {t:.1f}%" for n, v, t in metrics if v > t)
+        msg = " and ".join(f"{n} = {v:.2f}% > {t:.2f}%" for n, v, t in metrics if v > t)
         print(f"‼️  Price differences violate the threshold: {msg}")
     return not fail
 
@@ -244,3 +252,218 @@ def _plot_comparison(
     plt.title(f"{ticker} price comparison")
     plt.tight_layout()
     plt.show()
+
+
+def check_options(
+    calls: pd.DataFrame,
+    puts: pd.DataFrame,
+    underlying: str,
+    underlying_df: pd.DataFrame,
+    config: OptionsChecksConfig,
+) -> bool:
+    """Structural gate for the options output. yfinance has no historical per-contract
+    series so external comparison is impossible — instead we check self-consistency
+    against the underlying via four no-arb bounds:
+
+      1. positivity (P > 0, C > 0) — strict, every bar
+      2. no bars past `parse_osi_ticker(t).expiry` — strict, every bar
+      3. upper bounds: P ≤ K and C ≤ S — relative-p99-gated, near-the-money/OTM bars
+      4. intrinsic floors: P ≥ max(K - S, 0), C ≥ max(S - K, 0) — same gating
+
+    Checks 3-4 skip deep-ITM bars (intrinsic > `deep_itm_moneyness_cap` × underlying):
+    those contracts are stock proxies whose illiquid last-trade prints breach the
+    bounds routinely without a real arb. See `OptionsChecksConfig` for the rationale.
+
+    `underlying_df` must be the SPLIT-ADJUSTED-ONLY underlying — option prices and
+    intrinsic value use the underlying as it traded (cash dividends are priced into
+    the premium ahead of ex-date, not back-adjusted out). Passing a dividend-adjusted
+    series here overstates intrinsic on pre-dividend bars and produces false alarms.
+    """
+    print(f"\n🔍 Checking {underlying} options...")
+    if calls.empty and puts.empty:
+        print("⚠️  Both calls and puts empty; nothing to check")
+        return False
+
+    threshold_rel = config["noarb_violation_p99_rel"]
+    deep_itm_cap = config["deep_itm_moneyness_cap"]
+    if underlying not in underlying_df.columns:
+        raise KeyError(
+            f"underlying_df must have a column named `{underlying}`; got {list(underlying_df.columns)}"
+        )
+    underlying_series = underlying_df[underlying]
+
+    results: list[bool] = []
+    for side, df in [("calls", calls), ("puts", puts)]:
+        if df.empty:
+            print(f"⚠️  {side} side empty; skipping {side} checks")
+            continue
+        results.extend(_run_side_checks(side, df, underlying_series, threshold_rel, deep_itm_cap))
+    return all(results) if results else False
+
+
+def _run_side_checks(
+    side: str,
+    df: pd.DataFrame,
+    underlying_series: pd.Series,
+    threshold_rel: float,
+    deep_itm_cap: float,
+) -> list[bool]:
+    """Run the four checks on one side (calls or puts). Strikes, the underlying snapshot,
+    intrinsic value, and the deep-ITM mask are computed once and shared across checks."""
+    ts_level = cast(pd.DatetimeIndex, df.index.get_level_values("timestamp_utc"))
+    ticker_level = df.index.get_level_values("ticker")
+    parsed_by_ticker = {t: parse_osi_ticker(cast(str, t)) for t in ticker_level.unique()}
+    strikes = np.array([parsed_by_ticker[t].strike for t in ticker_level])
+    underlying_at_t = cast(pd.Series, underlying_series.reindex(ts_level)).to_numpy()
+    close = df["close"].to_numpy()
+
+    # Intrinsic and the shallow (= not-deep-ITM) mask are shared by both no-arb bound
+    # checks. Deep-ITM bars (intrinsic > cap × underlying) are dropped from those checks
+    # only — positivity and expiry still cover every bar.
+    if side == "calls":
+        intrinsic = np.maximum(underlying_at_t - strikes, 0.0)
+    else:
+        intrinsic = np.maximum(strikes - underlying_at_t, 0.0)
+    shallow = intrinsic <= deep_itm_cap * underlying_at_t
+
+    return [
+        _check_positive(side, close, ts_level, ticker_level),
+        _check_no_bars_past_expiry(side, ts_level, ticker_level, parsed_by_ticker),
+        _check_upper_bound(side, close, strikes, underlying_at_t, shallow, threshold_rel),
+        _check_intrinsic_floor(side, close, intrinsic, underlying_at_t, shallow, threshold_rel),
+    ]
+
+
+def _format_examples(
+    ts: pd.DatetimeIndex, tickers: pd.Index, mask: np.ndarray, values: np.ndarray, n: int = 3
+) -> str:
+    idx = np.flatnonzero(mask)[:n]
+    parts = [f"{tickers[i]} @ {ts[i]} = {values[i]:.4f}" for i in idx]
+    return "; ".join(parts)
+
+
+def _check_positive(side: str, close: np.ndarray, ts: pd.DatetimeIndex, tickers: pd.Index) -> bool:
+    bad = ~(close > 0)
+    n_bad = int(bad.sum())
+    if n_bad:
+        print(
+            f"❗ {side}: {n_bad:,} bars are not strictly positive "
+            f"(worst: {_format_examples(ts, tickers, bad, close)})"
+        )
+        return False
+    print(f"✔️  {side} > 0: all {len(close):,} bars positive")
+    return True
+
+
+def _check_no_bars_past_expiry(
+    side: str, ts: pd.DatetimeIndex, tickers: pd.Index, parsed_by_ticker: dict
+) -> bool:
+    bar_dates = np.asarray(ts.tz_convert("America/New_York").date)
+    expiries = np.asarray([parsed_by_ticker[t].expiry for t in tickers])
+    bad = bar_dates > expiries
+    n_bad = int(bad.sum())
+    if n_bad:
+        # Inline rather than reuse _format_examples — values here are dates, not
+        # floats, and `:.4f` on a date silently renders the literal `.4f` (strftime
+        # treats it as a template with no directives).
+        idx = np.flatnonzero(bad)[:3]
+        ex = "; ".join(
+            f"{tickers[i]} @ {ts[i]} (bar date {bar_dates[i]} > expiry {expiries[i]})" for i in idx
+        )
+        print(f"❗ {side}: {n_bad:,} bars past contract expiry (worst: {ex})")
+        return False
+    print(f"✔️  {side} bars all within contract expiry")
+    return True
+
+
+def _check_upper_bound(
+    side: str,
+    close: np.ndarray,
+    strikes: np.ndarray,
+    underlying_at_t: np.ndarray,
+    shallow: np.ndarray,
+    threshold_rel: float,
+) -> bool:
+    """Calls: close ≤ underlying. Puts: close ≤ strike. Evaluated over non-deep-ITM bars
+    (`shallow`) only — see `_run_side_checks`. Percentile-gated on the breach RELATIVE to
+    the underlying price: a contract's last print lags spot during a down-move and can
+    breach the bound by a few % without an exploitable arb. Isolated stale prints leave
+    p99 at zero; a systematic mis-scaling breaches a large fraction and pushes p99 past
+    the band.
+    """
+    label = "underlying" if side == "calls" else "strike"
+    upper = underlying_at_t if side == "calls" else strikes
+    n_excl = int((~shallow).sum())
+    if not shallow.any():
+        print(
+            f"✔️  {side} ≤ {label}: no near-the-money bars to check ({n_excl:,} deep-ITM excluded)"
+        )
+        return True
+    rel_breach = np.maximum(close[shallow] - upper[shallow], 0.0) / underlying_at_t[shallow]
+    p50 = float(np.percentile(rel_breach, 50))
+    p99 = float(np.percentile(rel_breach, 99))
+    worst = float(rel_breach.max())
+    n_viol = int((rel_breach > 0).sum())
+    status = "❗" if p99 > threshold_rel else "✔️ "
+    print(
+        f"{status} {side} ≤ {label}: rel breach p50/p99/max = "
+        f"{p50:.2%}/{p99:.2%}/{worst:.2%} over {n_viol:,} violating bars "
+        f"(excl {n_excl:,} deep-ITM; p99 threshold {threshold_rel:.2%})"
+    )
+    return p99 <= threshold_rel
+
+
+def _check_intrinsic_floor(
+    side: str,
+    close: np.ndarray,
+    intrinsic: np.ndarray,
+    underlying_at_t: np.ndarray,
+    shallow: np.ndarray,
+    threshold_rel: float,
+) -> bool:
+    """Calls: close ≥ max(S - K, 0). Puts: close ≥ max(K - S, 0). Evaluated over
+    non-deep-ITM bars (`shallow`) only — see `_run_side_checks`. Percentile-gated on the
+    shortfall RELATIVE to the underlying price: stale/off-market prints on illiquid ITM
+    contracts routinely sit a few % below intrinsic (the last trade lags spot during a
+    move) without an exploitable arb, and the noise scales with the price level — so a
+    relative gate ports across assets where an absolute dollar gate wouldn't. A missed
+    split, by contrast, shows up as a shortfall that is a large fraction of the
+    underlying, far above the noise band — and one that hits near-the-money contracts
+    too, so it survives the deep-ITM exclusion.
+    """
+    n_excl = int((~shallow).sum())
+    if not shallow.any():
+        print(
+            f"✔️  {side} intrinsic floor: no near-the-money bars to check ({n_excl:,} deep-ITM excluded)"
+        )
+        return True
+    rel_shortfall = np.maximum(intrinsic[shallow] - close[shallow], 0.0) / underlying_at_t[shallow]
+    p50 = float(np.percentile(rel_shortfall, 50))
+    p99 = float(np.percentile(rel_shortfall, 99))
+    worst = float(rel_shortfall.max())
+    n_viol = int((rel_shortfall > 0).sum())
+    status = "❗" if p99 > threshold_rel else "✔️ "
+    print(
+        f"{status} {side} intrinsic floor: rel shortfall p50/p99/max = "
+        f"{p50:.2%}/{p99:.2%}/{worst:.2%} over {n_viol:,} violating bars "
+        f"(excl {n_excl:,} deep-ITM; p99 threshold {threshold_rel:.2%})"
+    )
+    return p99 <= threshold_rel
+
+
+def save_options_if_valid(
+    calls: pd.DataFrame,
+    puts: pd.DataFrame,
+    underlying: str,
+    underlying_df: pd.DataFrame,
+    save_dir: str,
+    format: PriceFileFormat,
+    config: OptionsChecksConfig,
+) -> bool:
+    """Run the structural gate; on pass, save both sides and verify the round-trip."""
+    if not check_options(calls, puts, underlying, underlying_df, config):
+        print(f"\n❌ {underlying} options checks failed, not saving!")
+        return False
+    print(f"\n🎉 {underlying} options checks passed, saving...")
+    save_options(calls, puts, underlying, save_dir=save_dir, format=format)
+    return verify_saved_options(calls, puts, underlying, save_dir=save_dir, format=format)

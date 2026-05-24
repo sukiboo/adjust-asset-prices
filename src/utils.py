@@ -421,3 +421,82 @@ def verify_saved_prices(df: pd.DataFrame, save_dir: str, format: PriceFileFormat
     print(f"💿 Successfully loaded {ticker} data through {format}")
     print(loaded)
     return True
+
+
+def save_options(
+    calls: pd.DataFrame,
+    puts: pd.DataFrame,
+    underlying: str,
+    save_dir: str = "./data/prices",
+    format: PriceFileFormat = "parquet",
+) -> None:
+    """Save calls and puts to `<save_dir>/options/<UNDERLYING>_{calls,puts}.<format>`.
+    Each frame is multi-indexed on `(timestamp_utc, ticker)` with a `close` column;
+    empty frames are skipped (one side may legitimately have no contracts in range).
+    """
+    out_dir = os.path.join(save_dir, "options")
+    os.makedirs(out_dir, exist_ok=True)
+    for side, df in (("calls", calls), ("puts", puts)):
+        if df.empty:
+            print(f"⚠️  {underlying} {side}: no contracts to save")
+            continue
+        save_path = f"{out_dir}/{underlying}_{side}.{format}"
+        if format == "csv":
+            df.to_csv(save_path, index=True)
+        elif format == "parquet":
+            df.to_parquet(save_path)
+        else:
+            raise ValueError(f"Invalid format: {format}, must be `csv` or `parquet`")
+        n_contracts = df.index.get_level_values("ticker").nunique()
+        print(
+            f"📀 Saved {underlying} {side} ({len(df):,} bars / "
+            f"{n_contracts:,} contracts) to {save_path}"
+        )
+
+
+def load_options_file(file_name: str, load_dir: str = "./data/prices/options") -> pd.DataFrame:
+    """Load a saved options file (multi-indexed on `(timestamp_utc, ticker)`).
+    Parquet preserves the multi-index and tz natively; CSV is re-parsed and the
+    `timestamp_utc` level is re-localized to UTC if it came back naive.
+    """
+    file_path = os.path.join(load_dir, file_name)
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Options file not found: `{file_path}`")
+    file_ext = os.path.splitext(file_name)[1].lower()
+    if file_ext == ".csv":
+        df = pd.read_csv(file_path, index_col=[0, 1], parse_dates=[0])
+    elif file_ext == ".parquet":
+        df = pd.read_parquet(file_path)
+    else:
+        raise ValueError(f"Unsupported file format: `{file_ext}`, must be `csv` or `parquet`")
+
+    ts_level = cast(pd.DatetimeIndex, df.index.get_level_values("timestamp_utc"))
+    if ts_level.tz is None:
+        df.index = df.index.set_levels(  # type: ignore[attr-defined]
+            ts_level.tz_localize("UTC"), level="timestamp_utc"
+        )
+    return df
+
+
+def verify_saved_options(
+    calls: pd.DataFrame,
+    puts: pd.DataFrame,
+    underlying: str,
+    save_dir: str,
+    format: PriceFileFormat,
+) -> bool:
+    """Reload each saved side and confirm values + index match the in-memory frames."""
+    options_dir = os.path.join(save_dir, "options")
+    ok = True
+    for side, df in (("calls", calls), ("puts", puts)):
+        if df.empty:
+            continue
+        loaded = load_options_file(f"{underlying}_{side}.{format}", load_dir=options_dir)
+        values_match = np.allclose(df.values, loaded.values, equal_nan=True)
+        index_match = df.index.equals(loaded.index)
+        if not (values_match and index_match):
+            print(f"❗ Saved options file for {underlying} {side} does not match in-memory data!")
+            ok = False
+            continue
+        print(f"💿 Successfully loaded {underlying} {side} through {format}")
+    return ok

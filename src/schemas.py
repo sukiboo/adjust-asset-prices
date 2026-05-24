@@ -40,6 +40,36 @@ class ChecksConfig(TypedDict):
     abs_rel_diff_pct_p99: float
 
 
+class OptionsChecksConfig(TypedDict):
+    """Thresholds for the options structural gate.
+
+    The strict gates (positivity, no bars past expiry) have no threshold — any
+    violation fails, and they apply to every bar regardless of moneyness.
+
+    The no-arb bound checks — upper bounds (C ≤ S, P ≤ K) and intrinsic floors
+    (C ≥ max(S-K, 0), P ≥ max(K-S, 0)) — are percentile-gated on the violation
+    *relative to the underlying price*: illiquid ITM prints lag spot and routinely
+    breach either bound by a few % without a real arb, and that noise scales with
+    the price level, so a relative gate ports across assets where an absolute dollar
+    gate wouldn't. A systematic mis-scaling (a whole contract class off by the split
+    ratio) breaches a large fraction of bars and pushes p99 well past the band.
+
+    - `noarb_violation_p99_rel`: gate fires when p99 of (violation / underlying)
+      exceeds this. Default 0.05 (5%).
+    - `deep_itm_moneyness_cap`: bars where intrinsic > this × underlying are excluded
+      from BOTH no-arb bound checks (not from positivity / expiry). Deep-ITM contracts
+      are stock proxies whose illiquid last-trade prints breach the bounds as a matter
+      of course (sub-intrinsic bid-side fills, stale ffilled prints during a move);
+      the violation rate climbs monotonically with moneyness (empirically ~1% near the
+      money → ~34% at >80% ITM on NVDA's 2024 split window). The bounds are only
+      informative for the liquid near-the-money / OTM contracts, and a systematic split
+      error is still caught there because it hits all moneyness uniformly. Default 0.5.
+    """
+
+    noarb_violation_p99_rel: float
+    deep_itm_moneyness_cap: float
+
+
 class OSIContract(NamedTuple):
     """Parsed OSI (Options Symbology Initiative) option ticker components.
     Underlying is the root symbol as emitted by Polygon (no yfinance normalization);
