@@ -205,18 +205,20 @@ def test_tsla_2020_multi_split(options_prices: Prices) -> None:
 
 # --- Reverse splits ---------------------------------------------------------------------------
 # These verify the reverse-split branch (yfinance ratio < 1 → premium ×k, strike K→K×k) via
-# split CONTINUITY and the cumulative back-adjustment factor. They deliberately do NOT assert
-# the structural gate: reverse splits only happen on assets the gate's spot-based intrinsic
-# floor can't handle, and a full survey of all 6008 option underlyings found no exception.
-#   - penny stocks (the vast majority; the actual pre-split price is ~$1-3): tick granularity +
-#     stale illiquid prints, amplified by the ×k multiplier, push the floor p99 well past 5%.
-#   - vol/leveraged ETPs (VXX, UVXY, USO, BOIL, ...): steep roll-decay carry drags the forward
-#     far below spot, so ITM CALLS legitimately trade below S-K — the floor is the wrong bound.
-#   - high-yield mortgage REITs (CIM, ARR): dividend carry, same one-sided call breach.
+# split CONTINUITY and the cumulative back-adjustment factor. Whether they ALSO assert the
+# structural gate now splits by *why* a reverse-split name is hard:
+#   - penny stocks (the actual pre-split price is ~$1-3): the bound violations were tick
+#     granularity + stale illiquid prints, ×k-amplified — but that noise lived in SYNTHETIC
+#     backfilled bars and DEEP-ITM real prints. Now the gate scores REAL near-the-money bars
+#     only, so GRPN (1:20) passes cleanly; it asserts the gate.
+#   - vol/leveraged ETPs (VXX, UVXY, USO, ...): steep roll-decay carry drags the forward far
+#     below spot, so ITM CALLS legitimately trade below S-K on REAL near-the-money bars too —
+#     the spot-based floor is the wrong bound, and real-bar gating can't fix it. VXX still
+#     SKIPS the gate (a carry-aware floor would be needed; see CLAUDE.md).
+#   - high-yield mortgage REITs (CIM, ARR): dividend carry, same one-sided real call breach.
 #   - confounded names (GE: GEHC/Vernova spinoffs divide the underlying but not the options;
 #     AMC: simultaneous APE conversion breaks continuity).
-# In every tested case the split ADJUSTMENT is correct (continuity = 1.0); only the gate's
-# large-cap-tuned floor rejects them, for reasons unrelated to splits.
+# In every tested case the split ADJUSTMENT is correct (continuity = 1.0).
 
 
 @pytest.mark.integration
@@ -224,9 +226,9 @@ def test_grpn_2020_reverse_split(options_prices: Prices) -> None:
     # GRPN 1:20 reverse split ex 2020-06-11 (yfinance ratio 0.05 → 1/0.05 = 20). A 1:20 reverse
     # raises the price ~20x, so pre-split premiums are multiplied by 20 and strikes rewritten
     # K→K×20; the busiest spanning call is continuous (ratio ~1, not ~0.05 = the raw 1/20 jump).
-    # GRPN's only corporate action is this split (no spinoff/dividend confound). Gate skipped —
-    # GRPN traded at ~$1.30 pre-split, so penny-tick stale prints ×20 push the put floor to ~17%
-    # with no split error (see the section comment above).
+    # GRPN's only corporate action is this split (no spinoff/dividend confound). Gate ASSERTED:
+    # GRPN's old ~17% floor breach was deep-ITM/synthetic noise (GRPN traded ~$1.30 pre-split,
+    # so penny-tick stale prints ×20); on REAL near-the-money bars it passes (see section above).
     calls, puts, ref = quiet_get_options(options_prices, "GRPN", "2020-06-09", "2020-06-15")
     _describe_options(calls, puts, "GRPN")
     assert not calls.empty and not puts.empty, "❌ expected both GRPN calls and puts in range"
@@ -244,6 +246,8 @@ def test_grpn_2020_reverse_split(options_prices: Prices) -> None:
     ref_level = float(ref["GRPN"].median())
     assert ref_level > 10, f"❌ underlying not back-adjusted by ×20 (median ${ref_level:.2f})"
     print(f"✔️  GRPN back-adjusted underlying median: ${ref_level:.2f} (×20 ~ $26, raw ~ $1.30)")
+
+    assert quiet_check_options(calls, puts, "GRPN", ref), "❌ GRPN structural gate failed"
 
 
 @pytest.mark.integration

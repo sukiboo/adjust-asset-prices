@@ -2,18 +2,15 @@ import argparse
 import sys
 from typing import get_args
 
-from src import Prices, save_if_valid, save_options_if_valid
+from src import Prices
 from src.constants import (
-    CHECKS_CONFIG,
     DEFAULT_DATA_DIR,
     DEFAULT_DATE_END,
     DEFAULT_DATE_START,
     DEFAULT_FORMAT,
     DEFAULT_SAVE_DIR,
-    OPTIONS_CHECKS_CONFIG,
-    SHOW_PLOT,
 )
-from src.schemas import AssetType, PriceFileFormat
+from src.schemas import PriceFileFormat
 from src.utils import parsable_date
 
 
@@ -46,62 +43,15 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _print_options_summary(label: str, df) -> None:
-    if df.empty:
-        print(f"   {label}: 0 bars / 0 contracts")
-        return
-    ts = df.index.get_level_values("timestamp_utc")
-    n_contracts = df.index.get_level_values("ticker").nunique()
-    print(f"   {label}: {len(df):,} bars / {n_contracts:,} contracts " f"({ts.min()} → {ts.max()})")
-
-
 if __name__ == "__main__":
     args = parse_args()
-
-    prices = Prices(data_dir=args.data_dir)
-
-    if args.options:
-        # Retrieve the options for the ticker plus its (split-only) underlying in one call.
-        underlying, calls, puts = prices.options.get_options(
-            args.ticker, date_start=args.date_start, date_end=args.date_end
-        )
-        if not save_if_valid(
-            underlying,
-            save_dir=args.save_dir,
-            format=args.format,
-            config=CHECKS_CONFIG,
-            asset_type=AssetType.STOCKS,
-            show_plot=SHOW_PLOT,
-            dividends_adjusted=False,
-        ):
-            print(f"❌ {args.ticker} stock price failed verification -- aborting options pass!")
-            sys.exit(1)
-        print(f"\n🗃️  Option contracts for {args.ticker}:")
-        _print_options_summary("calls", calls)
-        _print_options_summary("puts", puts)
-        if not save_options_if_valid(
-            calls,
-            puts,
-            underlying=args.ticker,
-            underlying_df=underlying,
-            save_dir=args.save_dir,
-            format=args.format,
-            config=OPTIONS_CHECKS_CONFIG,
-        ):
-            sys.exit(1)
-    else:
-        df, asset_type = prices.asset.get_prices(
-            ticker=args.ticker,
-            date_start=args.date_start,
-            date_end=args.date_end,
-            dividends=args.dividends,
-        )
-        save_if_valid(
-            df,
-            save_dir=args.save_dir,
-            format=args.format,
-            config=CHECKS_CONFIG,
-            asset_type=asset_type,
-            show_plot=SHOW_PLOT,
-            dividends_adjusted=args.dividends,
-        )
+    ok = Prices(data_dir=args.data_dir).process(
+        ticker=args.ticker,
+        date_start=args.date_start,
+        date_end=args.date_end,
+        dividends=args.dividends,
+        options=args.options,
+        save_dir=args.save_dir,
+        format=args.format,
+    )
+    sys.exit(0 if ok else 1)

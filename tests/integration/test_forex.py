@@ -4,7 +4,12 @@ import pytest
 
 from src import Prices
 from src.schemas import AssetType
-from tests.conftest import describe, quiet_check, quiet_get, require_asset_data
+from tests.conftest import (
+    describe_adjusted_prices,
+    quiet_check,
+    quiet_get,
+    require_asset_data,
+)
 
 
 @pytest.fixture(scope="module")
@@ -27,7 +32,7 @@ def test_eur_usd_202503_202505(forex_prices: Prices) -> None:
     # gate would fail.
     df, asset_type = quiet_get(forex_prices, "EUR-USD", "2025-03-01", "2025-04-30")
     assert asset_type == AssetType.FOREX, "❌ asset type misdetected (expected FOREX)"
-    describe(df, "EUR-USD")
+    describe_adjusted_prices(df, "EUR-USD")
     assert quiet_check(df, asset_type), "❌ price comparison to yfinance failed"
 
 
@@ -39,7 +44,7 @@ def test_eur_usd_2022_2024(forex_prices: Prices) -> None:
     # multiple year-end boundaries.
     df, asset_type = quiet_get(forex_prices, "EUR-USD", "2022-01-01", "2024-12-31")
     assert asset_type == AssetType.FOREX, "❌ asset type misdetected (expected FOREX)"
-    describe(df, "EUR-USD")
+    describe_adjusted_prices(df, "EUR-USD")
     assert quiet_check(df, asset_type), "❌ price comparison to yfinance failed"
 
 
@@ -56,7 +61,7 @@ def test_usd_jpy_2022(forex_prices: Prices) -> None:
     # ~7k rows and no USD-JPY ticker, which trips determine_asset_type's last-file probe.
     df, asset_type = quiet_get(forex_prices, "USD-JPY", "2022-01-01", "2022-12-30")
     assert asset_type == AssetType.FOREX, "❌ asset type misdetected (expected FOREX)"
-    describe(df, "USD-JPY")
+    describe_adjusted_prices(df, "USD-JPY")
     assert quiet_check(df, asset_type), "❌ price comparison to yfinance failed"
 
 
@@ -67,5 +72,5 @@ def test_eur_gbp_2023(forex_prices: Prices) -> None:
     # not overlap with test_usd_jpy_2022.
     df, asset_type = quiet_get(forex_prices, "EUR-GBP", "2023-01-01", "2023-12-31")
     assert asset_type == AssetType.FOREX, "❌ asset type misdetected (expected FOREX)"
-    describe(df, "EUR-GBP")
+    describe_adjusted_prices(df, "EUR-GBP")
     assert quiet_check(df, asset_type), "❌ price comparison to yfinance failed"

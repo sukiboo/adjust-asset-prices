@@ -54,20 +54,25 @@ class OptionsChecksConfig(TypedDict):
     gate wouldn't. A systematic mis-scaling (a whole contract class off by the split
     ratio) breaches a large fraction of bars and pushes p99 well past the band.
 
-    - `noarb_violation_p99_rel`: gate fires when p99 of (violation / underlying)
-      exceeds this. Default 0.05 (5%).
-    - `deep_itm_moneyness_cap`: bars where intrinsic > this × underlying are excluded
-      from BOTH no-arb bound checks (not from positivity / expiry). Deep-ITM contracts
-      are stock proxies whose illiquid last-trade prints breach the bounds as a matter
-      of course (sub-intrinsic bid-side fills, stale ffilled prints during a move);
-      the violation rate climbs monotonically with moneyness (empirically ~1% near the
-      money → ~34% at >80% ITM on NVDA's 2024 split window). The bounds are only
-      informative for the liquid near-the-money / OTM contracts, and a systematic split
-      error is still caught there because it hits all moneyness uniformly. Default 0.5.
+    Both values are percentages (like `ChecksConfig`'s `abs_rel_diff_pct_*`), expressed as
+    the number itself: `1.0` means 1%, `50.0` means 50%.
+
+    - `noarb_violation_pct_p99`: gate fires when the p99 of `100 × violation / underlying`
+      (the breach/shortfall as a % of the underlying price) exceeds this. Default 1.0 (1%).
+    - `deep_itm_intrinsic_pct`: a bar is "deep-ITM" when its intrinsic value is more than this
+      % of the underlying price (`intrinsic > deep_itm_intrinsic_pct/100 × underlying`); e.g.
+      50.0 → intrinsic > half the spot price. Deep-ITM bars are excluded from BOTH no-arb bound
+      checks (not from positivity / expiry). Such contracts are stock proxies whose illiquid
+      last-trade prints breach the bounds as a matter of course (sub-intrinsic bid-side fills,
+      stale prints during a move); the violation rate climbs monotonically with moneyness
+      (empirically ~1% near the money → ~34% at >80% ITM on NVDA's 2024 split window). The
+      bounds are only informative for the liquid near-the-money / OTM contracts, and a
+      systematic split error is still caught there because it hits all moneyness uniformly.
+      Default 50.0.
     """
 
-    noarb_violation_p99_rel: float
-    deep_itm_moneyness_cap: float
+    noarb_violation_pct_p99: float
+    deep_itm_intrinsic_pct: float
 
 
 class OSIContract(NamedTuple):

@@ -10,6 +10,9 @@ import pytest
 from src import Prices, check_options, check_prices
 from src.constants import CHECKS_CONFIG, DEFAULT_DATA_DIR, OPTIONS_CHECKS_CONFIG
 from src.schemas import AssetType
+from src.utils import describe_adjusted_prices
+
+__all__ = ["describe_adjusted_prices"]
 
 
 @pytest.fixture(scope="session")
@@ -24,14 +27,6 @@ def require_asset_data(data_dir: Path, asset_type: AssetType) -> None:
     sub = data_dir / asset_type
     if not (sub.is_dir() and any(sub.glob("*.csv.gz"))):
         pytest.skip(f"No raw {asset_type} files at {sub}.")
-
-
-def describe(df: pd.DataFrame, ticker: str) -> None:
-    print(
-        "\n"
-        f"🔎 {ticker}: {len(df):,} values from {df.index[0]} to {df.index[-1]},"
-        f" price ranges from ${df[ticker].min():,.2f} to ${df[ticker].max():,.2f}"
-    )
 
 
 @contextmanager
@@ -83,11 +78,15 @@ def quiet_check(df: pd.DataFrame, asset_type: AssetType, dividends_adjusted: boo
 def quiet_get_options(
     prices: Prices, underlying: str, date_start: str, date_end: str
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    # Full options pipeline plus the split-only underlying reference the gate needs,
-    # mirroring main.py's --options flow. Returns (calls, puts, underlying).
+    # Option contracts plus the split-only underlying reference the gate needs, retrieved via
+    # the same paths Prices.process uses (get_prices for the underlying, dividends off; then
+    # get_options for the contracts). Returns (calls, puts, underlying).
     with quiet_output():
-        result = prices.options.get_options(underlying, date_start, date_end)
-    return result.calls, result.puts, result.underlying
+        underlying_df, _ = prices.asset.get_prices(
+            underlying, date_start, date_end, dividends=False
+        )
+        calls, puts = prices.options.get_options(underlying, date_start, date_end)
+    return calls, puts, underlying_df
 
 
 def quiet_check_options(

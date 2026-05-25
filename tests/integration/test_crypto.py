@@ -4,7 +4,12 @@ import pytest
 
 from src import Prices
 from src.schemas import AssetType
-from tests.conftest import describe, quiet_check, quiet_get, require_asset_data
+from tests.conftest import (
+    describe_adjusted_prices,
+    quiet_check,
+    quiet_get,
+    require_asset_data,
+)
 
 
 @pytest.fixture(scope="module")
@@ -24,7 +29,7 @@ def test_btc_usd_luna_crash(crypto_prices: Prices) -> None:
     # still catching real divergence.
     df, asset_type = quiet_get(crypto_prices, "BTC-USD", "2022-05-01", "2022-06-30")
     assert asset_type == AssetType.CRYPTO, "❌ asset type misdetected (expected CRYPTO)"
-    describe(df, "BTC-USD")
+    describe_adjusted_prices(df, "BTC-USD")
     assert quiet_check(df, asset_type), "❌ price comparison to yfinance failed"
 
 
@@ -36,7 +41,7 @@ def test_btc_usd_2020_2022(crypto_prices: Prices) -> None:
     # accumulated tz drift, etc.).
     df, asset_type = quiet_get(crypto_prices, "BTC-USD", "2020-01-01", "2022-12-31")
     assert asset_type == AssetType.CRYPTO, "❌ asset type misdetected (expected CRYPTO)"
-    describe(df, "BTC-USD")
+    describe_adjusted_prices(df, "BTC-USD")
     assert quiet_check(df, asset_type), "❌ price comparison to yfinance failed"
 
 
@@ -48,7 +53,7 @@ def test_eth_usd_2021_2022(crypto_prices: Prices) -> None:
     # second high-liquidity coin where any per-ticker yfinance quirks would surface.
     df, asset_type = quiet_get(crypto_prices, "ETH-USD", "2021-01-01", "2022-12-31")
     assert asset_type == AssetType.CRYPTO, "❌ asset type misdetected (expected CRYPTO)"
-    describe(df, "ETH-USD")
+    describe_adjusted_prices(df, "ETH-USD")
     assert quiet_check(df, asset_type), "❌ price comparison to yfinance failed"
 
 
@@ -60,5 +65,5 @@ def test_sol_usd_2022_2023(crypto_prices: Prices) -> None:
     # crypto thresholds tolerate yfinance's daily-vs-minute inconsistency over a long range.
     df, asset_type = quiet_get(crypto_prices, "SOL-USD", "2022-01-01", "2023-12-31")
     assert asset_type == AssetType.CRYPTO, "❌ asset type misdetected (expected CRYPTO)"
-    describe(df, "SOL-USD")
+    describe_adjusted_prices(df, "SOL-USD")
     assert quiet_check(df, asset_type), "❌ price comparison to yfinance failed"

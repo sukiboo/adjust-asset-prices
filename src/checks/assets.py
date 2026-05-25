@@ -1,6 +1,7 @@
 from typing import cast
 
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mtick
 import pandas as pd
 import seaborn as sns
 import yfinance as yf
@@ -190,13 +191,13 @@ def compare_to_yf(
     try:
         yf_daily = _yf_daily_close(ticker, asset_type, start_date, end_date, dividends_adjusted)
         if yf_daily is None:
-            print(f"⚠️  Warning: No yfinance data found for {ticker}")
+            print(f"⚠️ Warning: No yfinance data found for {ticker}")
             return False
 
         comparison = pd.concat([_our_daily_close(df, asset_type), yf_daily], axis=1).dropna()
         comparison.columns = ["our_close", "yf_close"]
         if comparison.empty:
-            print("⚠️  Warning: No overlapping dates")
+            print("⚠️ Warning: No overlapping dates")
             return False
 
         diff_usd = comparison["our_close"] - comparison["yf_close"]
@@ -210,7 +211,7 @@ def compare_to_yf(
         return passed
 
     except Exception as e:
-        print(f"⚠️  Error comparing with yfinance: {e}")
+        print(f"⚠️ Error comparing with yfinance: {e}")
         return False
 
 
@@ -246,22 +247,54 @@ def _diff_passes_thresholds(
 def _plot_comparison(
     comparison: pd.DataFrame, diff_pct: pd.Series, ticker: str, diff_ylim: float
 ) -> None:
-    _, ax1 = plt.subplots(figsize=(12, 6))
-    ax1.plot(comparison.index, comparison["our_close"], alpha=0.9, label="Adjusted prices")
-    ax1.plot(comparison.index, comparison["yf_close"], alpha=0.9, label="Yahoo Finance")
+    # Tailwind blue-500 / green-500 / red-400.
+    price_adj, price_yf, diff_color = "#3b82f6", "#22c55e", "#f87171"
+
+    fig, ax1 = plt.subplots(figsize=(12, 6))
+    # Both series share thickness and carry opacity so the overlap (a near-perfect
+    # match) blends visibly instead of one line hiding the other.
+    (adj_line,) = ax1.plot(
+        comparison.index,
+        comparison["our_close"],
+        color=price_adj,
+        linewidth=3,
+        alpha=0.75,
+        label="Adjusted prices",
+        zorder=2,
+    )
+    (yf_line,) = ax1.plot(
+        comparison.index,
+        comparison["yf_close"],
+        color=price_yf,
+        linewidth=3,
+        alpha=0.75,
+        label="Yahoo Finance",
+        zorder=1,
+    )
     ax1.set_xlabel("Date")
-    ax1.set_ylabel("Price ($)", color="black")
-    ax1.legend(loc="upper left")
+    ax1.set_ylabel("Price ($)")
+    ax1.margins(x=0.01)
 
     ax2 = ax1.twinx()
-    ax2.plot(
-        comparison.index, diff_pct, color="red", linestyle=":", alpha=0.4, label="Relative diff"
+    ax2.axhline(0, color=diff_color, linewidth=0.8, alpha=0.3)
+    ax2.fill_between(comparison.index, diff_pct, 0, color=diff_color, alpha=0.1, zorder=0)
+    (diff_line,) = ax2.plot(
+        comparison.index,
+        diff_pct,
+        color=diff_color,
+        linewidth=1.2,
+        alpha=0.7,
+        label="Relative diff",
     )
     ax2.set_ylim(-diff_ylim, diff_ylim)
-    ax2.set_ylabel("Relative price difference (%)", color="red")
+    ax2.set_ylabel("Relative price difference", color=diff_color)
+    ax2.tick_params(axis="y", colors=diff_color)
+    ax2.yaxis.set_major_formatter(mtick.FormatStrFormatter("%.2f%%"))
     ax2.grid(False)
-    ax2.legend(loc="upper right")
 
-    plt.title(f"{ticker} price comparison")
-    plt.tight_layout()
+    handles = [adj_line, yf_line, diff_line]
+    ax1.legend(handles, [str(h.get_label()) for h in handles], loc="upper left", framealpha=0.9)
+
+    ax1.set_title(f"{ticker} price comparison", fontsize=14, pad=12)
+    fig.tight_layout()
     plt.show()

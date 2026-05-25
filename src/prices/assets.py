@@ -7,6 +7,7 @@ from ..schemas import AssetType
 from ..utils import (
     build_target_index,
     check_data_dir,
+    describe_adjusted_prices,
     fetch_dividends,
     fetch_splits,
     fetch_yf_closes,
@@ -37,13 +38,14 @@ class AssetPrices:
         """
         df, asset_type = self.load_prices(ticker, date_start, date_end)
         df = self.adjust_prices(df, asset_type, date_start, date_end, dividends)
+        describe_adjusted_prices(df, ticker)
         return df, asset_type
 
     def load_prices(
         self, ticker: str, date_start: str | None = None, date_end: str | None = None
     ) -> tuple[pd.DataFrame, AssetType]:
         """Load prices for a given ticker and date range."""
-        print(f"⛏️  Loading {ticker} price data...")
+        print(f"\n⛏️  Loading {ticker} price data...")
         df, asset_type = load_ticker_data(
             self.data_dir, self.asset_types, ticker, date_start, date_end
         )
@@ -56,11 +58,7 @@ class AssetPrices:
 
         start_date = parse_date(cast(pd.Timestamp, df.index[0]))
         end_date = parse_date(cast(pd.Timestamp, df.index[-1]))
-        print(
-            f"🗑️  Loaded {len(df):,} price records for {ticker} "
-            f"from {start_date} to {end_date}:"
-            f"\n{'-' * 32}\n{df.head(5)}\n{'-' * 32}"
-        )
+        print(f"🗑️  Loaded {len(df):,} price records for {ticker} from {start_date} to {end_date}")
 
         return df, asset_type
 
@@ -83,8 +81,7 @@ class AssetPrices:
         print(f"⚙️  Adjusting {df.columns[0]} price data...")
         df = self.adjust_for_splits(df, asset_type)
         df = self.backfill_prices(df, asset_type, date_start, date_end)
-        if dividends:
-            df = self.adjust_for_dividends(df, asset_type)
+        df = self.adjust_for_dividends(df, asset_type, dividends)
         return df
 
     def adjust_for_splits(self, df: pd.DataFrame, asset_type: AssetType) -> pd.DataFrame:
@@ -134,11 +131,13 @@ class AssetPrices:
         assert df.index.equals(target_index), "backfill produced unexpected index"
         df[col] = df[col].apply(np.log).interpolate(method="linear").apply(np.exp).ffill().bfill()
         if len(df) > num_rows:
-            print(f"🔧 Backfilled {len(df) - num_rows:,} new rows")
+            print(f"🔧 Backfilled {len(df) - num_rows:,} rows")
         df.index.name = "timestamp_utc"
         return df
 
-    def adjust_for_dividends(self, df: pd.DataFrame, asset_type: AssetType) -> pd.DataFrame:
+    def adjust_for_dividends(
+        self, df: pd.DataFrame, asset_type: AssetType, dividends: bool = False
+    ) -> pd.DataFrame:
         """Back-adjust historical prices for cash dividends using yfinance dividend data.
         For each dividend with ex-date D and amount d, prices at timestamps < D are scaled
         by (1 - d / c) where c is yfinance's official Close on the trading day before D.
@@ -150,6 +149,10 @@ class AssetPrices:
             return df
 
         ticker = df.columns[0]
+        if not dividends:
+            print(f"🔩 Dividend adjustment for {ticker} is not requested, skipping")
+            return df
+
         divs = fetch_dividends(ticker, cast(pd.Timestamp, df.index[0])).sort_index()
         if divs.empty:
             print(f"🔩 No dividends to apply for {ticker}")

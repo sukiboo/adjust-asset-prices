@@ -1,12 +1,18 @@
 from datetime import date
-from typing import NamedTuple, cast
+from typing import Literal, cast
 
-import numpy as np
 import pandas as pd
 
+from ..constants import (
+    INTEGER_TOLERANCE,
+    MIN_SPLIT_FACTOR,
+    OPTIONS_SUCCESSOR_STRIKE_TOL,
+    OSI_STRIKE_SCALE,
+)
 from ..schemas import AssetType, OSIContract
 from ..utils import (
     build_target_index,
+    describe_adjusted_options,
     fetch_splits,
     format_osi_ticker,
     load_options_data,
@@ -14,42 +20,32 @@ from ..utils import (
 )
 from .assets import AssetPrices
 
-
-class OptionsResult(NamedTuple):
-    underlying: pd.DataFrame  # split-only backfilled stock series
-    calls: pd.DataFrame
-    puts: pd.DataFrame
+OptionSide = Literal["call", "put"]
 
 
 class OptionsPrices:
     """Options companion pass for an underlying: load → split-unify → backfill its OSI
-    contracts. Built from the `AssetPrices` sibling, which it uses to retrieve the underlying
-    (the structural gate compares each contract against it).
+    contracts. Built from the `AssetPrices` sibling purely to share its validated `data_dir`
+    (so `check_data_dir` runs once). The underlying itself is retrieved separately via the
+    standard `AssetPrices.get_prices` path; the structural gate compares contracts against it.
     """
 
     def __init__(self, asset: AssetPrices) -> None:
-        self.asset = asset
         self.data_dir = asset.data_dir
 
     def get_options(
         self, underlying: str, date_start: str | None = None, date_end: str | None = None
-    ) -> OptionsResult:
-        """Retrieve `underlying`'s option contracts plus its split-only underlying — the
-        options-side mirror of `AssetPrices.get_prices`. The underlying is never dividend-
-        adjusted (dividends are priced into premiums, not back-adjusted out), so it aligns
-        with the contracts.
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Retrieve `underlying`'s option contracts as `(calls, puts)`: load → split-unify →
+        backfill. The options-side mirror of `AssetPrices.get_prices`; the underlying series the
+        gate compares against is retrieved separately (split-only, via `get_prices`).
         """
-        raw_df, asset_type = self.asset.load_prices(underlying, date_start, date_end)
-        assert (
-            asset_type == AssetType.STOCKS
-        ), f"options underlying must be a stock, got {asset_type}"
-        split_only = self.asset.adjust_for_splits(raw_df, asset_type)
-        underlying_df = self.asset.backfill_prices(split_only, asset_type, date_start, date_end)
-
         calls, puts = self.load_options(underlying, date_start, date_end)
+        print("⚙️  Adjusting options contracts...")
         calls, puts = self.adjust_options_splits(calls, puts, underlying)
         calls, puts = self.backfill_options(calls, puts)
-        return OptionsResult(underlying_df, calls, puts)
+        describe_adjusted_options(calls, puts, underlying)
+        return calls, puts
 
     def load_options(
         self, underlying: str, date_start: str | None = None, date_end: str | None = None
@@ -58,7 +54,7 @@ class OptionsPrices:
         multi-indexed on `(timestamp_utc, ticker)` with a `close` column. I/O + reshape only
         (backfill / adjust / gate are downstream); either side may be empty.
         """
-        print(f"⛏️  Loading options for {underlying}...")
+        print(f"\n⛏️  Loading options for {underlying}...")
         df = load_options_data(self.data_dir, underlying, date_start, date_end)
         df["timestamp_utc"] = pd.to_datetime(df["window_start"], unit="ns", utc=True)
         df = df[["timestamp_utc", "ticker", "close"]]
@@ -78,23 +74,25 @@ class OptionsPrices:
 
         n_calls = calls.index.get_level_values("ticker").nunique() if not calls.empty else 0
         n_puts = puts.index.get_level_values("ticker").nunique() if not puts.empty else 0
-        print(f"🗑️  Loaded {len(calls):,} call bars across {n_calls:,} contracts")
-        print(f"🗑️  Loaded {len(puts):,} put bars across {n_puts:,} contracts")
+        print(f"🗑️  Loaded {len(calls):,} call records across {n_calls:,} contracts")
+        print(f"🗑️  Loaded {len(puts):,} put records across {n_puts:,} contracts")
 
         return calls, puts
 
     def backfill_options(
         self, calls: pd.DataFrame, puts: pd.DataFrame
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """Backfill each contract onto its RTH window `[first_bar, min(expiry, window_end)]`
-        — log-linear interior gaps, ffill/bfill edges. The end runs to expiry (not last
-        trade), so a contract is held flat to expiry rather than vanishing mid-life — matters
-        across splits, where an OCC-adjusted contract may not trade post-split.
+        """Backfill each contract onto its RTH window `[first_bar, min(expiry, window_end)]`.
+        Options are illiquid, so gaps (and the run-out to expiry) are filled with the last
+        traded price held flat (ffill/bfill) — not interpolated — to avoid inventing a price
+        path that never traded. The end runs to expiry (not last trade), so a contract is held
+        flat to expiry rather than vanishing mid-life (matters across splits, where an
+        OCC-adjusted contract may not trade post-split). Adds an `is_real` column flagging the
+        genuine prints (vs synthetic fill) so the structural gate can score real bars only.
         """
-        print("⚙️  Backfilling options contracts...")
-        return self._backfill_contracts(calls), self._backfill_contracts(puts)
+        return self._backfill_contracts(calls, "call"), self._backfill_contracts(puts, "put")
 
-    def _backfill_contracts(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _backfill_contracts(self, df: pd.DataFrame, side: OptionSide) -> pd.DataFrame:
         if df.empty:
             return df
 
@@ -121,16 +119,16 @@ class OptionsPrices:
             end_idx = full_et.searchsorted(end_ts, side="left")
             target_index = full_index[start_idx:end_idx]
             reindexed = series.reindex(target_index)
-            log_interp = cast(pd.Series, np.log(reindexed)).interpolate(method="linear")
-            filled = cast(pd.Series, np.exp(log_interp)).ffill().bfill()
-            filled.index = pd.MultiIndex.from_product(
+            is_real = reindexed.notna().to_numpy()
+            filled = reindexed.ffill().bfill().to_numpy()
+            mi = pd.MultiIndex.from_product(
                 [target_index, [ticker]], names=["timestamp_utc", "ticker"]
             )
-            backfilled.append(filled.to_frame("close"))
+            backfilled.append(pd.DataFrame({"close": filled, "is_real": is_real}, index=mi))
 
         result = pd.concat(backfilled).sort_index()
         n_contracts = result.index.get_level_values("ticker").nunique()
-        print(f"🔧 Backfilled to {len(result):,} rows across {n_contracts:,} contracts")
+        print(f"🔧 Backfilled to {len(result):,} rows across {n_contracts:,} {side} contracts")
         return result
 
     def adjust_options_splits(
@@ -156,12 +154,12 @@ class OptionsPrices:
             return calls, puts
         splits = splits.sort_index()
         return (
-            self._unify_split_symbols(calls, splits, underlying),
-            self._unify_split_symbols(puts, splits, underlying),
+            self._unify_split_symbols(calls, splits, underlying, "call"),
+            self._unify_split_symbols(puts, splits, underlying, "put"),
         )
 
     def _unify_split_symbols(
-        self, df: pd.DataFrame, splits: pd.Series, underlying: str
+        self, df: pd.DataFrame, splits: pd.Series, underlying: str, side: OptionSide
     ) -> pd.DataFrame:
         """Rewrite every pre-split contract into post-split currency, one split at a time."""
         if df.empty:
@@ -174,11 +172,16 @@ class OptionsPrices:
                     "likely a spinoff / distribution, not a stock split (no OCC support)"
                 )
                 continue
-            df = self._apply_split(df, split_ts, ratio, underlying)
+            df = self._apply_split(df, split_ts, ratio, underlying, side)
         return df
 
     def _apply_split(
-        self, df: pd.DataFrame, split_ts: pd.Timestamp, ratio: float, underlying: str
+        self,
+        df: pd.DataFrame,
+        split_ts: pd.Timestamp,
+        ratio: float,
+        underlying: str,
+        side: OptionSide,
     ) -> pd.DataFrame:
         """Rescale pre-split bars by 1/ratio, relabel to successor symbols, merge with the
         post-split bars (deduping the base/suffixed twins the raw feed emits).
@@ -205,8 +208,8 @@ class OptionsPrices:
 
         n_twins = len(merged) - len(deduped)
         print(
-            f"🪚  {ratio:g}-for-1 split on {split_ts.date()}: rewrote {len(rewrites)} contracts, "
-            f"{int(pre_mask.sum()):,} rows"
+            f"🪚  {ratio:g}-for-1 split on {split_ts.date()}: rewrote {len(rewrites):,}"
+            f" {side} contracts / {int(pre_mask.sum()):,} rows"
             + (f", deduped {n_twins:,} twin rows" if n_twins else "")
         )
         return deduped
@@ -243,13 +246,16 @@ class OptionsPrices:
         direct = format_osi_ticker(
             OSIContract(parsed.underlying, parsed.expiry, parsed.option_type, new_strike)
         )
-        clean = abs(new_strike * 1000 - round(new_strike * 1000)) < 1e-6
+        clean = (
+            abs(new_strike * OSI_STRIKE_SCALE - round(new_strike * OSI_STRIKE_SCALE))
+            < INTEGER_TOLERANCE
+        )
         if clean or parsed.expiry < split_date:
             return direct
 
         pool = candidates.get((parsed.expiry, parsed.option_type), [])
         best = min(pool, key=lambda c: abs(c[1] - new_strike), default=None)
-        if best is not None and abs(best[1] - new_strike) <= 0.01:
+        if best is not None and abs(best[1] - new_strike) <= OPTIONS_SUCCESSOR_STRIKE_TOL:
             print(
                 f"🔗  Suffix-match: {ticker} → {best[0]} "
                 f"(${parsed.strike} ÷ {ratio:g} ≈ ${new_strike:.4f} ≈ ${best[1]})"
@@ -280,8 +286,9 @@ class OptionsPrices:
             candidates.setdefault(key, []).append((cast(str, t), parsed.strike))
         return candidates
 
-    def _is_handled_split_ratio(self, ratio: float, tol: float = 1e-6) -> bool:
+    def _is_handled_split_ratio(self, ratio: float) -> bool:
         """True iff `ratio` is x or 1/x for integer x >= 2 (real x:1 / 1:x split); skips spinoffs."""
         return ratio > 0 and any(
-            abs(x - round(x)) < tol and round(x) >= 2 for x in (ratio, 1 / ratio)
+            abs(x - round(x)) < INTEGER_TOLERANCE and round(x) >= MIN_SPLIT_FACTOR
+            for x in (ratio, 1 / ratio)
         )

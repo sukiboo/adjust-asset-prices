@@ -9,6 +9,7 @@ import pandas as pd
 import pandas_market_calendars as mcal
 import yfinance as yf
 
+from .constants import OSI_STRIKE_SCALE
 from .schemas import (
     ASSET_TYPE_CONFIG,
     ASSET_TYPES,
@@ -178,7 +179,7 @@ def parse_osi_ticker(ticker: str) -> OSIContract:
         underlying=underlying,
         expiry=expiry,
         option_type=cast(Literal["C", "P"], option_char),
-        strike=int(strike_str) / 1000,
+        strike=int(strike_str) / OSI_STRIKE_SCALE,
     )
 
 
@@ -202,7 +203,7 @@ def format_osi_ticker(contract: OSIContract) -> str:
     check that themselves before calling.
     """
     yy = contract.expiry.year % 100
-    strike_milli = round(contract.strike * 1000)
+    strike_milli = round(contract.strike * OSI_STRIKE_SCALE)
     return (
         f"O:{contract.underlying}"
         f"{yy:02d}{contract.expiry.month:02d}{contract.expiry.day:02d}"
@@ -364,20 +365,56 @@ def fetch_yf_closes(ticker: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.S
     return closes
 
 
+def describe_adjusted_prices(df: pd.DataFrame, ticker: str) -> None:
+    """Print a one-line summary of a single-series price frame (bar count, index range,
+    price range). `ticker` names the price column."""
+    print(
+        f"🔎 {ticker}: {len(df):,} values from {df.index[0]} to {df.index[-1]},"
+        f" price ranges from ${df[ticker].min():,.2f} to ${df[ticker].max():,.2f}"
+    )
+
+
+def describe_adjusted_options(calls: pd.DataFrame, puts: pd.DataFrame, underlying: str) -> None:
+    """Print a per-side (bars / contracts / time range) summary of `underlying`'s options."""
+    print(f"🗃️  Option contracts for {underlying}:")
+    for label, df in (("calls", calls), ("puts", puts)):
+        if df.empty:
+            print(f"   - {label}: 0 bars / 0 contracts")
+            continue
+        ts = df.index.get_level_values("timestamp_utc")
+        n_contracts = df.index.get_level_values("ticker").nunique()
+        print(
+            f"   - {label}: {len(df):,} values / {n_contracts:,} contracts"
+            f" from {ts.min()} to {ts.max()}"
+        )
+
+
+def _date_range_suffix(start: pd.Timestamp, end: pd.Timestamp) -> str:
+    """`YYYYMMDD_YYYYMMDD` spanning [start, end] as UTC dates, for self-describing filenames."""
+    return f"{parse_date(start):%Y%m%d}_{parse_date(end):%Y%m%d}"
+
+
+def _price_file_name(df: pd.DataFrame, format: PriceFileFormat) -> str:
+    """`<TICKER>_<start>_<end>.<format>`; the date range is taken from the frame's own index."""
+    idx = cast(pd.DatetimeIndex, df.index)
+    suffix = _date_range_suffix(cast(pd.Timestamp, idx.min()), cast(pd.Timestamp, idx.max()))
+    return f"{df.columns[0]}_{suffix}.{format}"
+
+
 def save_prices(
     df: pd.DataFrame, save_dir: str = "./data/prices", format: PriceFileFormat = "parquet"
 ) -> None:
-    """Save the prices to a CSV or Parquet file."""
-    ticker = df.columns[0]
-    save_path = f"{save_dir}/{ticker}.{format}"
+    """Save the prices to `<save_dir>/<TICKER>_<start>_<end>.<format>` (date range from the
+    frame's own index)."""
     os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, _price_file_name(df, format))
     if format == "csv":
         df.to_csv(save_path, index=True)
     elif format == "parquet":
         df.to_parquet(save_path)
     else:
         raise ValueError(f"Invalid format: {format}, must be `csv` or `parquet`")
-    print(f"📀 Saved {ticker} prices to {save_path}")
+    print(f"📀 Saved {df.columns[0]} prices to {save_path}")
 
 
 def load_prices(file_name: str, load_dir: str = "./data/prices") -> pd.DataFrame:
@@ -412,15 +449,33 @@ def load_prices(file_name: str, load_dir: str = "./data/prices") -> pd.DataFrame
 def verify_saved_prices(df: pd.DataFrame, save_dir: str, format: PriceFileFormat) -> bool:
     """Reload the saved file and confirm it matches the in-memory data."""
     ticker = df.columns[0]
-    loaded = load_prices(f"{ticker}.{format}", load_dir=save_dir)
+    loaded = load_prices(_price_file_name(df, format), load_dir=save_dir)
     values_match = np.allclose(df.values, loaded.values, equal_nan=True)
     index_match = df.index.equals(loaded.index)
     if not (values_match and index_match):
         print(f"❗ Saved file for {ticker} does not match in-memory data!")
         return False
     print(f"💿 Successfully loaded {ticker} data through {format}")
-    print(loaded)
     return True
+
+
+def _options_date_range_suffix(calls: pd.DataFrame, puts: pd.DataFrame) -> str:
+    """One `YYYYMMDD_YYYYMMDD` shared across both sides (so a run's calls/puts files carry the
+    same range), spanning the min/max bar of the non-empty sides. "" only if both are empty."""
+    levels = [
+        cast(pd.DatetimeIndex, df.index.get_level_values("timestamp_utc"))
+        for df in (calls, puts)
+        if not df.empty
+    ]
+    if not levels:
+        return ""
+    start = min(cast(pd.Timestamp, lv.min()) for lv in levels)
+    end = max(cast(pd.Timestamp, lv.max()) for lv in levels)
+    return _date_range_suffix(start, end)
+
+
+def _options_file_name(underlying: str, suffix: str, side: str, format: PriceFileFormat) -> str:
+    return f"{underlying}_{suffix}_{side}.{format}"
 
 
 def save_options(
@@ -430,28 +485,27 @@ def save_options(
     save_dir: str = "./data/prices",
     format: PriceFileFormat = "parquet",
 ) -> None:
-    """Save calls and puts to `<save_dir>/options/<UNDERLYING>_{calls,puts}.<format>`.
-    Each frame is multi-indexed on `(timestamp_utc, ticker)` with a `close` column;
-    empty frames are skipped (one side may legitimately have no contracts in range).
+    """Save calls and puts to
+    `<save_dir>/options/<UNDERLYING>_<start>_<end>_{calls,puts}.<format>` (one shared date
+    range across both sides, from the frames' indices). Each frame is multi-indexed on
+    `(timestamp_utc, ticker)` with a `close` column; empty frames are skipped (one side may
+    legitimately have no contracts in range).
     """
     out_dir = os.path.join(save_dir, "options")
     os.makedirs(out_dir, exist_ok=True)
+    suffix = _options_date_range_suffix(calls, puts)
     for side, df in (("calls", calls), ("puts", puts)):
         if df.empty:
-            print(f"⚠️  {underlying} {side}: no contracts to save")
+            print(f"⚠️ {underlying} {side}: no contracts to save")
             continue
-        save_path = f"{out_dir}/{underlying}_{side}.{format}"
+        save_path = os.path.join(out_dir, _options_file_name(underlying, suffix, side, format))
         if format == "csv":
             df.to_csv(save_path, index=True)
         elif format == "parquet":
             df.to_parquet(save_path)
         else:
             raise ValueError(f"Invalid format: {format}, must be `csv` or `parquet`")
-        n_contracts = df.index.get_level_values("ticker").nunique()
-        print(
-            f"📀 Saved {underlying} {side} ({len(df):,} bars / "
-            f"{n_contracts:,} contracts) to {save_path}"
-        )
+        print(f"📀 Saved {underlying} {side} to {save_path}")
 
 
 def load_options_file(file_name: str, load_dir: str = "./data/prices/options") -> pd.DataFrame:
@@ -487,11 +541,14 @@ def verify_saved_options(
 ) -> bool:
     """Reload each saved side and confirm values + index match the in-memory frames."""
     options_dir = os.path.join(save_dir, "options")
+    suffix = _options_date_range_suffix(calls, puts)
     ok = True
     for side, df in (("calls", calls), ("puts", puts)):
         if df.empty:
             continue
-        loaded = load_options_file(f"{underlying}_{side}.{format}", load_dir=options_dir)
+        loaded = load_options_file(
+            _options_file_name(underlying, suffix, side, format), load_dir=options_dir
+        )
         values_match = np.allclose(df.values, loaded.values, equal_nan=True)
         index_match = df.index.equals(loaded.index)
         if not (values_match and index_match):
