@@ -3,12 +3,7 @@ from typing import Literal, cast
 
 import pandas as pd
 
-from ..constants import (
-    INTEGER_TOLERANCE,
-    MIN_SPLIT_FACTOR,
-    OPTIONS_SUCCESSOR_STRIKE_TOL,
-    OSI_STRIKE_SCALE,
-)
+from ..constants import OPTIONS_INTERNALS
 from ..schemas import AssetType, OSIContract
 from ..utils import (
     build_target_index,
@@ -246,16 +241,19 @@ class OptionsPrices:
         direct = format_osi_ticker(
             OSIContract(parsed.underlying, parsed.expiry, parsed.option_type, new_strike)
         )
+        scale = OPTIONS_INTERNALS["strike_scale"]
         clean = (
-            abs(new_strike * OSI_STRIKE_SCALE - round(new_strike * OSI_STRIKE_SCALE))
-            < INTEGER_TOLERANCE
+            abs(new_strike * scale - round(new_strike * scale)) < OPTIONS_INTERNALS["integer_tol"]
         )
         if clean or parsed.expiry < split_date:
             return direct
 
         pool = candidates.get((parsed.expiry, parsed.option_type), [])
         best = min(pool, key=lambda c: abs(c[1] - new_strike), default=None)
-        if best is not None and abs(best[1] - new_strike) <= OPTIONS_SUCCESSOR_STRIKE_TOL:
+        if (
+            best is not None
+            and abs(best[1] - new_strike) <= OPTIONS_INTERNALS["successor_strike_tol"]
+        ):
             print(
                 f"🔗  Suffix-match: {ticker} → {best[0]} "
                 f"(${parsed.strike} ÷ {ratio:g} ≈ ${new_strike:.4f} ≈ ${best[1]})"
@@ -289,6 +287,7 @@ class OptionsPrices:
     def _is_handled_split_ratio(self, ratio: float) -> bool:
         """True iff `ratio` is x or 1/x for integer x >= 2 (real x:1 / 1:x split); skips spinoffs."""
         return ratio > 0 and any(
-            abs(x - round(x)) < INTEGER_TOLERANCE and round(x) >= MIN_SPLIT_FACTOR
+            abs(x - round(x)) < OPTIONS_INTERNALS["integer_tol"]
+            and round(x) >= OPTIONS_INTERNALS["min_split_factor"]
             for x in (ratio, 1 / ratio)
         )

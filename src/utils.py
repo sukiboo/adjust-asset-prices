@@ -9,7 +9,7 @@ import pandas as pd
 import pandas_market_calendars as mcal
 import yfinance as yf
 
-from .constants import OSI_STRIKE_SCALE
+from .constants import OPTIONS_INTERNALS
 from .schemas import (
     ASSET_TYPE_CONFIG,
     ASSET_TYPES,
@@ -179,7 +179,7 @@ def parse_osi_ticker(ticker: str) -> OSIContract:
         underlying=underlying,
         expiry=expiry,
         option_type=cast(Literal["C", "P"], option_char),
-        strike=int(strike_str) / OSI_STRIKE_SCALE,
+        strike=int(strike_str) / OPTIONS_INTERNALS["strike_scale"],
     )
 
 
@@ -203,7 +203,7 @@ def format_osi_ticker(contract: OSIContract) -> str:
     check that themselves before calling.
     """
     yy = contract.expiry.year % 100
-    strike_milli = round(contract.strike * OSI_STRIKE_SCALE)
+    strike_milli = round(contract.strike * OPTIONS_INTERNALS["strike_scale"])
     return (
         f"O:{contract.underlying}"
         f"{yy:02d}{contract.expiry.month:02d}{contract.expiry.day:02d}"

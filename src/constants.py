@@ -16,15 +16,14 @@ OPTIONS_CHECKS_CONFIG: OptionsChecksConfig = {
     "deep_itm_intrinsic_pct": 50.0,  # exclude bars with intrinsic > this% of spot from the bounds
 }
 
-# OSI option-symbol encoding + split-unification tuning (used by the OSI parse/format helpers
-# in utils.py and the options split-unifier in prices/options.py).
-# OSI encodes strikes as an integer count of milli-dollars (1/1000 $).
-OSI_STRIKE_SCALE = 1000
-# Float slack for "is this a whole number": clean milli-strike and integer split ratio.
-INTEGER_TOLERANCE = 1e-6
-# Only x:1 / 1:x splits with integer x >= 2 are handled (a 1:1 isn't a split).
-MIN_SPLIT_FACTOR = 2
-# 1¢: max strike gap to match a spanning non-clean contract to its OCC suffixed successor.
-OPTIONS_SUCCESSOR_STRIKE_TOL = 0.01
+# Options-internal machinery (OSI symbology + split-unification), used by the OSI parse/format
+# helpers in utils.py and the split-unifier in prices/options.py. Not user-facing knobs — these
+# encode the OSI/OCC standard and empirical matching tolerances; change only if you know the spec.
+OPTIONS_INTERNALS = {
+    "strike_scale": 1000,  # OSI encodes strikes as an integer count of milli-dollars (1/1000 $)
+    "integer_tol": 1e-6,  # float slack for "is this a whole number" (clean strike / split ratio)
+    "min_split_factor": 2,  # only x:1 and 1:x with integer x >= 2 splits are handled
+    "successor_strike_tol": 0.01,  # 1¢ max strike gap to match a non-clean contract's successor
+}
 
 SHOW_PLOT = True

@@ -142,11 +142,16 @@ you would for `main.py` (a symlink to your raw-file mirror works). Current cover
   multi-split, ÷40 / ÷15), GRPN 1:20 2020 and VXX two-1:4 (reverse and cumulative-reverse
   splits, ×20 / ×16). Forward splits — and GRPN's reverse split — validate via the structural
   no-arb gate (`check_options`) against the split-only underlying, since yfinance has no
-  historical per-contract series. All assert split continuity and (for cumulative cases) the
-  back-adjustment factor. VXX **skips the gate**: as a steep-contango vol ETP its forward sits
-  far below spot, so ITM calls legitimately trade below the spot-based intrinsic floor on real
+  historical per-contract series. Forward splits also check split-successor **continuity** on a
+  *deep-ITM* probe contract (real-trade close before vs after the split, within ~10%): deep-ITM is
+  low-elasticity so the ratio reflects the adjustment rather than gamma, and real-trade endpoints
+  avoid the ffill artifact that makes fixed-time bars vacuously ~1. Reverse splits get **no
+  continuity probe** (thin/volatile names have no deep-ITM contract that traded both sides — only
+  ATM/OTM, which swing wildly on gamma); they verify the cumulative back-adjustment **factor**
+  instead (×20 / ×16). VXX additionally **skips the gate**: as a steep-contango vol ETP its forward
+  sits far below spot, so ITM calls legitimately trade below the spot-based intrinsic floor on real
   near-the-money bars — a genuine carry effect the gate can't model, independent of split
-  correctness. (GRPN's old failure was synthetic/deep-ITM noise, which the gate now excludes by
-  scoring real traded bars only — so it passes.)
+  correctness. (GRPN's old gate failure was synthetic/deep-ITM noise, which the gate now excludes
+  by scoring real traded bars only — so it passes.)
 
 Expect roughly 2–5 minutes per long-running test on first run.

@@ -13,6 +13,10 @@ from tests.conftest import (
     require_asset_data,
 )
 
+# Tolerance for the close-to-close ratio across a split boundary (~1 after back-adjustment).
+# Tighter than options' 0.1: stocks are liquid (real boundary print, no ffill) and unleveraged.
+CONTINUITY_EPS = 0.05
+
 
 @pytest.fixture(scope="module")
 def stocks_prices(data_dir: Path) -> Prices:
@@ -32,10 +36,8 @@ def _close_at(df: pd.DataFrame, et_date: str) -> float:
 
 @pytest.mark.integration
 def test_aapl_2014_split(stocks_prices: Prices) -> None:
-    # AAPL 7:1 split ex-date 2014-06-09. Last pre-split session is 2014-06-06.
-    # After back-adjustment, the close-to-close ratio across the boundary should
-    # be near 1 (daily noise), not near 7 (the raw, unadjusted ratio). Runs the default
-    # split-only path (no dividends), so the output compares against yfinance's raw Close.
+    # AAPL 7:1 split (ex 2014-06-09): back-adjusted close ratio across the boundary ~1, not ~7.
+    # Default split-only path → compared against yfinance's raw Close.
     df, asset_type = quiet_get(stocks_prices, "AAPL", "2014-05-01", "2014-07-31")
     assert asset_type == AssetType.STOCKS, "❌ asset type misdetected (expected STOCKS)"
     describe_adjusted_prices(df, "AAPL")
@@ -46,19 +48,18 @@ def test_aapl_2014_split(stocks_prices: Prices) -> None:
     print(
         f"🪚  AAPL split 2014-06-09: pre=${pre:.4f}, post=${post:.4f}, ratio={ratio:.4f} (raw ~7.0)"
     )
-    assert 0.95 < ratio < 1.05, f"❌ split-adjusted close ratio {ratio:.3f} (expected ~1)"
+    assert (
+        1 - CONTINUITY_EPS < ratio < 1 + CONTINUITY_EPS
+    ), f"❌ split-adjusted close ratio {ratio:.3f} (expected ~1)"
 
     assert quiet_check(df, asset_type), "❌ price comparison to yfinance failed"
 
 
 @pytest.mark.integration
 def test_aapl_2023_dividend_conventions(stocks_prices: Prices) -> None:
-    # Same ticker/window run BOTH ways to exercise the split-only default and the --dividends
-    # path, plus the convention switch in compare_to_yf. AAPL 2023 has four cash dividends and
-    # no split, so the dividend-adjusted series sits strictly below the split-only (raw) series
-    # on every pre-final-ex-date bar. Each output must match its OWN yfinance convention:
-    # split-only ↔ raw Close (auto_adjust=False), dividend-adjusted ↔ Adj Close
-    # (auto_adjust=True). If compare_to_yf picked the wrong convention, one side would fail.
+    # AAPL 2023 (4 dividends, no split) run BOTH ways: the convention switch in compare_to_yf —
+    # split-only ↔ raw Close, dividend-adjusted ↔ Adj Close. The div-adj series sits below the
+    # split-only one; a wrong convention pick would fail one side.
     split_only, asset_type = quiet_get(
         stocks_prices, "AAPL", "2023-01-01", "2023-12-31", dividends=False
     )
@@ -81,9 +82,8 @@ def test_aapl_2023_dividend_conventions(stocks_prices: Prices) -> None:
 
 @pytest.mark.integration
 def test_spy_2020_2023(stocks_prices: Prices) -> None:
-    # SPY across 2020-2023: quarterly dividends compound (~16 events), several half-days,
-    # COVID-era volatility. No splits, so this isolates the dividend-adjustment path
-    # over a multi-year range; the dividend-adjusted output must match yfinance's Adj Close.
+    # SPY 2020-2023 (no split, ~16 compounding dividends, half-days): the dividend path at
+    # multi-year scale, compared against yfinance Adj Close.
     df, asset_type = quiet_get(stocks_prices, "SPY", "2020-01-01", "2023-12-31", dividends=True)
     assert asset_type == AssetType.STOCKS, "❌ asset type misdetected (expected STOCKS)"
     describe_adjusted_prices(df, "SPY")
@@ -94,11 +94,8 @@ def test_spy_2020_2023(stocks_prices: Prices) -> None:
 
 @pytest.mark.integration
 def test_nvda_2020_2024_splits(stocks_prices: Prices) -> None:
-    # NVDA across 2020-2024: two splits (4:1 ex 2021-07-20, 10:1 ex 2024-06-10) interleaved
-    # with small quarterly dividends. Exercises adjust_for_splits applied twice in sequence
-    # plus the split-then-dividend ordering. Adjusted pre/post close ratios should be ~1
-    # across both split boundaries (dividends are tiny relative to the split factors, so
-    # the spot-checks hold with dividends on).
+    # NVDA 2020-2024: two splits (4:1, 10:1) + quarterly dividends — adjust_for_splits applied
+    # twice and the split-then-dividend ordering. Adjusted close ratio ~1 across both boundaries.
     df, asset_type = quiet_get(stocks_prices, "NVDA", "2020-01-01", "2024-12-31", dividends=True)
     assert asset_type == AssetType.STOCKS, "❌ asset type misdetected (expected STOCKS)"
     describe_adjusted_prices(df, "NVDA")
@@ -114,7 +111,9 @@ def test_nvda_2020_2024_splits(stocks_prices: Prices) -> None:
             f"🪚  NVDA split {split_date}: pre=${pre:.4f}, post=${post:.4f}, "
             f"ratio={ratio:.4f} (raw {raw_ratio})"
         )
-        assert 0.95 < ratio < 1.05, f"❌ NVDA split-adjusted ratio at {split_date} = {ratio:.3f}"
+        assert (
+            1 - CONTINUITY_EPS < ratio < 1 + CONTINUITY_EPS
+        ), f"❌ NVDA split-adjusted ratio at {split_date} = {ratio:.3f}"
 
     assert quiet_check(
         df, asset_type, dividends_adjusted=True
@@ -123,10 +122,8 @@ def test_nvda_2020_2024_splits(stocks_prices: Prices) -> None:
 
 @pytest.mark.integration
 def test_ge_2021_reverse_split(stocks_prices: Prices) -> None:
-    # GE 1:8 reverse split ex-date 2021-08-02. yfinance reports the ratio as 0.125;
-    # adjust_for_splits divides pre-event prices by that (= multiplies by 8), so the adjusted
-    # pre/post close ratio should be ~1 (raw would be ~0.125). Window deliberately stays
-    # before GE's 2023 GEHC spinoff, which the pipeline does NOT adjust for.
+    # GE 1:8 reverse split (ex 2021-08-02, yfinance ratio 0.125 → ×8): adjusted close ratio ~1
+    # (raw ~0.125). Window stays before GE's 2023 GEHC spinoff (not adjusted for).
     df, asset_type = quiet_get(stocks_prices, "GE", "2021-07-01", "2021-09-30")
     assert asset_type == AssetType.STOCKS, "❌ asset type misdetected (expected STOCKS)"
     describe_adjusted_prices(df, "GE")
@@ -137,18 +134,17 @@ def test_ge_2021_reverse_split(stocks_prices: Prices) -> None:
     print(
         f"🪚  GE split 2021-08-02: pre=${pre:.4f}, post=${post:.4f}, ratio={ratio:.4f} (raw ~0.125)"
     )
-    assert 0.95 < ratio < 1.05, f"❌ GE reverse-split-adjusted ratio = {ratio:.3f}"
+    assert (
+        1 - CONTINUITY_EPS < ratio < 1 + CONTINUITY_EPS
+    ), f"❌ GE reverse-split-adjusted ratio = {ratio:.3f}"
 
     assert quiet_check(df, asset_type), "❌ price comparison to yfinance failed"
 
 
 @pytest.mark.integration
 def test_qyld_2023_distributions(stocks_prices: Prices) -> None:
-    # QYLD pays monthly distributions (~1%/month), most of which are return-of-capital that
-    # yfinance lumps under .dividends. The pipeline treats them the same as ordinary
-    # dividends — that's correct because yfinance's Adj Close lumps them the same way, so
-    # check_prices against yfinance still passes despite the ROC vs. ordinary classification
-    # gap (see CLAUDE.md: .capital_gains is empty across every fund tested).
+    # QYLD monthly ROC distributions (yfinance lumps them under .dividends): the pipeline treats
+    # them as ordinary dividends, matching yfinance's Adj Close, so the gate still passes.
     df, asset_type = quiet_get(stocks_prices, "QYLD", "2023-01-01", "2023-12-31", dividends=True)
     assert asset_type == AssetType.STOCKS, "❌ asset type misdetected (expected STOCKS)"
     describe_adjusted_prices(df, "QYLD")
@@ -159,12 +155,8 @@ def test_qyld_2023_distributions(stocks_prices: Prices) -> None:
 
 @pytest.mark.integration
 def test_msft_2004_special_dividend(stocks_prices: Prices) -> None:
-    # MSFT paid a $3.08 special dividend ex-date 2004-11-15 on a ~$30 stock → ~10% drop.
-    # Last pre-ex session is Friday 2004-11-12. With the dividend correctly back-applied,
-    # adjusted pre/post ratio is ~1.0 ± typical daily noise; without it, the raw drop
-    # produces ratio ~1.11. Bounds at ±5% cleanly separate the two regimes — unlike the
-    # smaller COST 2024 $15 special (~2% drop) we considered, which sits inside daily-noise
-    # width and would not signal a missed adjustment.
+    # MSFT $3.08 special dividend (ex 2004-11-15, ~10% drop on a ~$30 stock): adjusted pre/post
+    # ratio ~1, vs ~1.11 unadjusted — a drop big enough to bound cleanly (unlike a ~2% special).
     df, asset_type = quiet_get(stocks_prices, "MSFT", "2004-10-01", "2004-12-31", dividends=True)
     assert asset_type == AssetType.STOCKS, "❌ asset type misdetected (expected STOCKS)"
     describe_adjusted_prices(df, "MSFT")
@@ -175,9 +167,8 @@ def test_msft_2004_special_dividend(stocks_prices: Prices) -> None:
     print(
         f"🪏  MSFT special-div 2004-11-15: pre=${pre:.4f}, post=${post:.4f}, ratio={ratio:.4f} (raw ~1.11)"
     )
-    # Upper bound at 1.0 assumes non-negative ex-date drift (stocks usually don't drop the
-    # full dividend intraday). True in general, true for MSFT 2004 specifically (observed
-    # 0.98), and cleanly excludes the broken/unadjusted case (~1.11).
+    # Upper bound at 1.0: stocks rarely drop the full dividend intraday (observed 0.98), and
+    # 1.0 cleanly excludes the unadjusted case (~1.11).
     assert 0.95 < ratio < 1.0, f"❌ MSFT special-div adjusted ratio = {ratio:.4f}"
 
     assert quiet_check(
@@ -187,14 +178,10 @@ def test_msft_2004_special_dividend(stocks_prices: Prices) -> None:
 
 @pytest.mark.integration
 def test_bbby_2023_delisting(stocks_prices: Prices) -> None:
-    # BBBY (Bed Bath & Beyond) traded through ~2023-04-28 before delisting on bankruptcy.
-    # yfinance still serves a BBBY history but on a heavily-adjusted basis (~$17-25 over this
-    # window) that no longer matches the real traded prices our pipeline loads from Polygon
-    # (~$0.2-7). The two diverge by ~92% (p50), far above any stock threshold, so check_prices
-    # returns False. The divergence is convention-independent (yfinance's raw Close and Adj
-    # Close are identical here), so this runs the default split-only path. The test asserts the
-    # divergence: if it ever flips to passing, yfinance changed its delisting handling and we
-    # should revisit. Documents a known gap, not a green-light test.
+    # BBBY pre-bankruptcy: yfinance serves a heavily-adjusted history (~$17-25) that no longer
+    # matches the real Polygon traded prices (~$0.2-7) — ~92% divergence, so check_prices returns
+    # False. The test INVERTS the assertion (`not quiet_check`): a documented known-divergence gap,
+    # and a canary if yfinance ever changes its delisting handling.
     df, asset_type = quiet_get(stocks_prices, "BBBY", "2023-01-01", "2023-04-21")
     assert asset_type == AssetType.STOCKS, "❌ asset type misdetected (expected STOCKS)"
     describe_adjusted_prices(df, "BBBY")
