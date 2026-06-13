@@ -1,8 +1,8 @@
-# 🗂️ Adjusted Asset Prices 🗂️
+# 🗂️ Adjust Asset Prices 🗂️
 
 Adjust raw historical prices for gaps, splits (and optionally dividends), with an opt-in options pass.
 
-Follow-up to the [`historical-asset-prices`](https://github.com/sukiboo/historical-asset-prices) repo,
+Follow-up to the [`fetch-asset-prices`](https://github.com/sukiboo/fetch-asset-prices) repo,
 which produces the raw input files this tool reads from `./data/files/<asset_type>/`.
 
 ## Scope
@@ -17,8 +17,8 @@ it more easily; the value here is in multi-year histories you can't get cleanly 
 ## Setup
 
 ```bash
-pyenv virtualenv 3.12 adjusted-asset-prices
-pyenv activate adjusted-asset-prices
+pyenv virtualenv 3.12 adjust-asset-prices
+pyenv activate adjust-asset-prices
 pip install -r requirements.txt
 ```
 
@@ -28,7 +28,7 @@ The repo's `.python-version` pins the venv, so `cd`-ing in auto-activates it if 
 The pipeline reads raw daily price files from `./data/files/<asset_type>/`. Download the
 pre-built files (all asset types, through 2026) from the
 [data archive](https://www.dropbox.com/scl/fo/xd5a5s5cwa0imf6gvplzv/AL1ffzRw3_AEfeEwRoKLQms?rlkey=ah6c8ps5zvco29npoeoro831k&dl=0),
-or generate them with [`historical-asset-prices`](https://github.com/sukiboo/historical-asset-prices).
+or generate them with [`fetch-asset-prices`](https://github.com/sukiboo/fetch-asset-prices).
 Running `run.py` without local data prints this same pointer.
 
 ## Usage
