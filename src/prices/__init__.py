@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 from ..checks import save_if_valid, save_options_if_valid
 from ..constants import (
     CHECKS_CONFIG,
@@ -29,12 +31,15 @@ class Prices:
         save_dir: str = DEFAULT_SAVE_DIR,
         format: PriceFileFormat = DEFAULT_FORMAT,
         show_plot: bool = DEFAULT_SHOW_PLOT,
+        confirm_on_fail: Callable[[], bool] | None = None,
     ) -> bool:
         """Retrieve → check → save `ticker`, and (when `options`) its option contracts.
         The asset series is always retrieved via the same `get_prices` path — split-only when
         `options` (which is mutually exclusive with `dividends`), so it aligns with the
-        contracts and doubles as the structural gate's reference. Returns True iff everything
-        checked and saved/verified.
+        contracts and doubles as the structural gate's reference. `confirm_on_fail` is the CLI's
+        interactive override: when the asset checks fail it's invoked and the data saved anyway
+        iff it returns True (default `None` → strict, never save on fail). Returns True iff
+        everything checked (or was overridden) and saved/verified.
         """
         df, asset_type = self.asset.get_prices(ticker, date_start, date_end, dividends=dividends)
         if options:
@@ -50,6 +55,7 @@ class Prices:
             asset_type=asset_type,
             show_plot=show_plot,
             dividends_adjusted=dividends,
+            confirm_on_fail=confirm_on_fail,
         )
         if options and saved:
             calls, puts = self.options.get_options(ticker, date_start, date_end)

@@ -12,7 +12,7 @@ from src.constants import (
     DEFAULT_SHOW_PLOT,
 )
 from src.schemas import PriceFileFormat
-from src.utils import parsable_date
+from src.utils import parsable_date, save_on_fail_decider
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,6 +28,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         default=DEFAULT_SHOW_PLOT,
         help="Display the price-comparison plot against yfinance. Off by default.",
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="Save the data even if the checks fail, skipping the interactive prompt. In an "
+        "interactive terminal you'd otherwise be asked [y/N]; --force is also the only way to "
+        "override in a non-interactive run (script/CI).",
     )
     # Mutually exclusive: a dividend-adjusted underlying can't align with the (never
     # dividend-adjusted) options, so passing both errors at parse time, before any retrieval.
@@ -61,5 +68,6 @@ if __name__ == "__main__":
         save_dir=args.save_dir,
         format=args.format,
         show_plot=args.plot,
+        confirm_on_fail=save_on_fail_decider(args.force),
     )
     sys.exit(0 if ok else 1)

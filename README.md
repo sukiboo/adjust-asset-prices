@@ -58,9 +58,16 @@ Options:
 | `--dividends`   | off              | also back-adjust stocks for cash dividends           |
 | `--options`     | off              | also fetch the underlying's option contracts         |
 | `--plot`        | off              | display the price-comparison plot against yfinance   |
+| `--force`       | off              | save even if the price checks fail                  |
 
 `--dividends` and `--options` are mutually exclusive: the default output is the actual
 split-adjusted (not dividend-adjusted) price, so options align with their underlying.
+
+When the sanity checks fail the data is **not** saved by default. In an interactive terminal
+you're prompted `[y/N]` to save it anyway; `--force` skips that prompt (and is the only way to
+override in a non-interactive run). Overridden output is saved as-is and unvalidated — useful
+for long crypto histories where the early, low-liquidity years diverge from yfinance's own
+sparse early data far more than the threshold allows (see [Scope](#scope)).
 
 Examples:
 

@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import cast
 
 import matplotlib.pyplot as plt
@@ -46,8 +47,12 @@ def save_if_valid(
     asset_type: AssetType,
     show_plot: bool,
     dividends_adjusted: bool,
+    confirm_on_fail: Callable[[], bool] | None = None,
 ) -> bool:
-    """Run checks; on success, save to disk and verify the round-trip."""
+    """Run checks; on success, save to disk and verify the round-trip. When checks fail,
+    `confirm_on_fail` (if given) is invoked and the data is saved anyway iff it returns True —
+    the CLI's interactive override. Default `None` keeps the strict "never save on fail"
+    behavior, so non-CLI callers (tests) are unaffected and never block on input."""
     if not check_prices(
         df,
         config=config,
@@ -55,9 +60,11 @@ def save_if_valid(
         show_plot=show_plot,
         dividends_adjusted=dividends_adjusted,
     ):
-        print("\n❌ Some checks failed, not saving the price data!")
-        return False
-    print("\n🎉 All checks passed, saving the price data...")
+        if confirm_on_fail is None or not confirm_on_fail():
+            print("\n❌ Some checks failed, not saving the price data!")
+            return False
+    else:
+        print("\n🎉 All checks passed, saving the price data...")
     save_prices(df, save_dir=save_dir, format=format)
     verify_saved_prices(df, save_dir=save_dir, format=format)
     return True

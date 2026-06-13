@@ -1,5 +1,7 @@
 import os
 import re
+import sys
+from collections.abc import Callable
 from datetime import date, datetime
 from pathlib import Path
 from typing import Literal, Tuple, cast
@@ -562,3 +564,17 @@ def verify_saved_options(
             continue
         print(f"💿 Successfully loaded {underlying} {side} through {format}")
     return ok
+
+
+def _prompt_save_on_fail() -> bool:
+    return input("\n❓ Checks failed. Save the data anyway? [y/N] ").strip().lower() in ("y", "yes")
+
+
+def save_on_fail_decider(force: bool) -> Callable[[], bool] | None:
+    # Policy for failed checks: --force saves unconditionally; an interactive terminal prompts;
+    # a non-interactive run keeps the safe default (None → don't save).
+    if force:
+        return lambda: True
+    if sys.stdin.isatty():
+        return _prompt_save_on_fail
+    return None
