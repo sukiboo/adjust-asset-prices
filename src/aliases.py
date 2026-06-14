@@ -212,9 +212,8 @@ def stitch_predecessors(
             if _pregap_is_foreign(combined, rows, gap_start, have, sanity):
                 kept = combined[_to_et(combined["window_start"]).dt.date > gap_end]
                 print(
-                    f"🧹  {ticker}: dropped {len(combined) - len(kept):,} rows before {gap_start} "
-                    f"(reused ticker — a different instrument held {ticker} there, not predecessor "
-                    f"{pred})"
+                    f"🧹 {ticker}: dropped {len(combined) - len(kept):,} rows before {gap_start} "
+                    f"(reused ticker -- another company held {ticker} there, unrelated to {pred})"
                 )
                 combined = kept
                 break  # re-derive gaps on the cleaned series

@@ -177,6 +177,45 @@ def test_msft_2004_special_dividend(stocks_prices: Prices) -> None:
 
 
 @pytest.mark.integration
+def test_qqq_qqqq_rename_stitch(stocks_prices: Prices) -> None:
+    # QQQ traded as QQQQ until 2011-03. Requesting QQQ with a --date-start before that surfaces a
+    # leading gap that auto-stitches the QQQQ predecessor (matched by the stops + liquidity +
+    # nearest-price filters). The stitched QQQ+QQQQ series matches yfinance's rename-aware
+    # continuous QQQ. (Leading gap → no pre-gap segment, so the reused-ticker check is a no-op; the
+    # interior genuine-rename path is validated manually — QQQ 2004→2011 — but too slow for CI.)
+    df, asset_type = quiet_get(stocks_prices, "QQQ", "2010-06-01", "2011-12-31")
+    assert asset_type == AssetType.STOCKS, "❌ asset type misdetected (expected STOCKS)"
+    describe_adjusted_prices(df, "QQQ")
+
+    # The QQQQ era (pre-2011-03) is stitched in, not left as a gap: bars exist in 2010.
+    years = set(df.index.year)  # type: ignore[attr-defined]
+    assert 2010 in years, "❌ no bars in the QQQQ era (2010) — predecessor not stitched"
+
+    assert quiet_check(df, asset_type), "❌ stitched QQQ+QQQQ failed yfinance comparison"
+
+
+@pytest.mark.integration
+def test_meta_reused_ticker_drop(stocks_prices: Prices) -> None:
+    # "META" was Meta Materials (~$12-15) until early 2022, then Facebook took the symbol on its
+    # FB→META rename (2022-06-09) — two unrelated companies under one ticker. The window holds the
+    # Meta-Materials Jan-2022 tail + Facebook-META from the rename. The loader picks up the foreign
+    # head; the stitcher detects it (the predecessor FB connects only on the resume edge, not the
+    # pre-gap edge) and drops it, then stitches FB back for the leading span. The result is
+    # continuous Facebook history matching yfinance's rename-aware META.
+    df, asset_type = quiet_get(stocks_prices, "META", "2022-01-01", "2022-09-30")
+    assert asset_type == AssetType.STOCKS, "❌ asset type misdetected (expected STOCKS)"
+    describe_adjusted_prices(df, "META")
+
+    # The foreign Meta-Materials head (~$12-15) is gone: every price is Facebook-scale (well above
+    # $100 across this window; Meta Materials never traded above ~$20).
+    low = float(df["META"].min())
+    print(f"🧹 META min price after drop: ${low:.2f} (Meta Materials traded ~$12-15)")
+    assert low > 50, f"❌ foreign Meta-Materials head not dropped (min ${low:.2f})"
+
+    assert quiet_check(df, asset_type), "❌ stitched FB→META failed yfinance comparison"
+
+
+@pytest.mark.integration
 def test_bbby_2023_delisting(stocks_prices: Prices) -> None:
     # BBBY pre-bankruptcy: yfinance serves a heavily-adjusted history (~$17-25) that no longer
     # matches the real Polygon traded prices (~$0.2-7) — ~92% divergence, so check_prices returns
