@@ -21,6 +21,23 @@ OPTIONS_CHECKS_CONFIG: OptionsChecksConfig = {
     "deep_itm_intrinsic_pct": 50.0,  # exclude bars with intrinsic > this% of spot from the bounds
 }
 
+# compare_to_yf coverage guard: fail if our series has a contiguous run longer than this of trading
+# sessions that yfinance has no data for — that span is uncorroborated (a wrong stitch or ticker).
+# Small scattered gaps (yfinance hiccups, weekend forex) are well under this and pass.
+YF_MAX_MISSING_RUN_SESSIONS = 10
+
+# Ticker-rename auto-stitch tuning (stocks only). A long gap in a live ticker's raw history
+# (interior, or leading vs date_start) means it likely traded under a former symbol — e.g. QQQ
+# was QQQQ 2004-2011 — which is recovered from our own files. Not user-facing; see aliases.py.
+ALIAS_INTERNALS = {
+    "min_gap_trading_days": 30,  # raw gap (NYSE sessions) that triggers a predecessor search
+    "boundary_slop_sessions": 3,  # post-resume sessions to skip (rename overlap) before stops check
+    "survivor_window_sessions": 126,  # post-resume sessions scanned for "still trading" (~6 months)
+    "liquidity_window_sessions": 5,  # sessions each side of the rename for the median bar-count check
+    "liquidity_frac": 0.5,  # min predecessor median bars/day vs the requested series' (filters thin)
+    "splice_sanity_pct": 10.0,  # max plausible % price jump across a rename splice; else no match
+}
+
 # Options-internal machinery (OSI symbology + split-unification), used by the OSI parse/format
 # helpers in utils.py and the split-unifier in prices/options.py. Not user-facing knobs — these
 # encode the OSI/OCC standard and empirical matching tolerances; change only if you know the spec.

@@ -156,6 +156,23 @@ Two things hold across every asset type:
 - **Dividends** are opt-in via `--dividends` (off by default, so the default output is the
   actual split-adjusted traded price). With the flag, the series is back-adjusted to a
   total-return basis matching yfinance's `Adj Close`.
+- **Ticker renames** are stitched automatically. Request the *current* symbol (the one valid
+  at `--date-end`) and a long gap in its raw history — interior (e.g. QQQ traded as QQQQ
+  2004–2011) or leading vs `--date-start` (e.g. META's pre-2022 history under FB) — triggers a
+  search of the local files for the predecessor symbol, which is spliced in so the output is
+  one continuous series under the requested ticker. The match is local-data-only (the symbol
+  that stops trading right where the requested series resumes, traded with comparable liquidity,
+  and is nearest in price); the compare-to-yfinance check is the independent verification — it
+  rejects the result if yfinance can't corroborate a stitched span, so a wrong match can't slip
+  through. No external rename API is used or needed. A genuinely new ticker with no predecessor is
+  left alone.
+- **Reused tickers** are handled too. When a symbol was held by an unrelated company before the
+  current one (e.g. `META` was Meta Materials at ~$12 until early 2022, then Facebook took it on
+  its FB→META rename), the loader picks up that foreign history along with the real series. The
+  stitcher detects it: a genuine rename connects on *both* edges of the gap, but a reused ticker
+  connects only on the resume side — so the discontinuous pre-gap segment is dropped as foreign.
+  `META` thus loads as clean Facebook history (and `--date-start` before the rename pulls FB's
+  earlier history back as a normal stitch).
 
 ### Options
 

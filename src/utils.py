@@ -218,6 +218,17 @@ def format_osi_ticker(contract: OSIContract) -> str:
     )
 
 
+def read_gz(path: Path, cols: list[str] | None = None) -> pd.DataFrame:
+    """Read a gzipped daily CSV (pyarrow when available, else the default parser). `cols` limits
+    the columns read; None reads all."""
+    try:
+        return pd.read_csv(
+            path, compression="gzip", engine="pyarrow", dtype_backend="pyarrow", usecols=cols
+        )
+    except Exception:
+        return pd.read_csv(path, compression="gzip", usecols=cols)
+
+
 def determine_asset_type(
     data_dir: Path,
     asset_types: list[str],
@@ -240,7 +251,7 @@ def determine_asset_type(
             last_file = files_in_range[-1]
             asset_type_enum = AssetType(asset_type)
             normalized_ticker = normalize_ticker(ticker, asset_type_enum)
-            df = pd.read_csv(last_file, compression="gzip")
+            df = read_gz(last_file)
             if "ticker" in df.columns and (df["ticker"] == normalized_ticker).any():
                 return asset_type_enum, files_in_range
         except Exception:
@@ -272,13 +283,7 @@ def load_options_data(
     prefilter = rf"O:{re.escape(underlying)}\d"
     dfs = []
     for file_path in files_in_range:
-        try:
-            df = pd.read_csv(
-                file_path, compression="gzip", engine="pyarrow", dtype_backend="pyarrow"
-            )
-        except Exception:
-            df = pd.read_csv(file_path, compression="gzip")
-
+        df = read_gz(file_path)
         candidates = df[df["ticker"].str.match(prefilter, na=False)]
         if candidates.empty:
             continue
@@ -298,6 +303,21 @@ def load_options_data(
     return pd.concat(dfs, ignore_index=True)
 
 
+def load_symbol_rows(files: list[Path], symbol: str) -> pd.DataFrame:
+    """Concatenate the raw rows for one exact (already-normalized) ticker symbol across `files`.
+    Returns an empty frame if the symbol appears in none of them — callers decide if that's an
+    error. Shared by `load_ticker_data` and the alias stitcher (which loads predecessor symbols).
+    """
+    dfs = []
+    for file_path in files:
+        df = read_gz(file_path)
+        rows = df[df["ticker"] == symbol]
+        if not rows.empty:
+            dfs.append(rows)
+
+    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+
+
 def load_ticker_data(
     data_dir: Path,
     asset_types: list[str],
@@ -311,24 +331,11 @@ def load_ticker_data(
     asset_type, files_in_range = determine_asset_type(
         data_dir, asset_types, ticker, date_start, date_end
     )
-    normalized_ticker = normalize_ticker(ticker, asset_type)
-    dfs = []
-    for file_path in files_in_range:
-        try:
-            df = pd.read_csv(
-                file_path, compression="gzip", engine="pyarrow", dtype_backend="pyarrow"
-            )
-        except Exception:
-            df = pd.read_csv(file_path, compression="gzip")
-
-        ticker_rows = df[df["ticker"] == normalized_ticker]
-        if not ticker_rows.empty:
-            dfs.append(ticker_rows)
-
-    if not dfs:
+    df = load_symbol_rows(files_in_range, normalize_ticker(ticker, asset_type))
+    if df.empty:
         raise ValueError(f"No data found for `{asset_type}` ticker `{ticker}`")
 
-    return pd.concat(dfs, ignore_index=True), asset_type
+    return df, asset_type
 
 
 def fetch_splits(ticker: str, start: pd.Timestamp) -> pd.Series:

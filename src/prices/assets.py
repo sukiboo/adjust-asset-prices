@@ -3,6 +3,7 @@ from typing import cast
 import numpy as np
 import pandas as pd
 
+from ..aliases import stitch_predecessors
 from ..schemas import AssetType
 from ..utils import (
     build_target_index,
@@ -51,6 +52,11 @@ class AssetPrices:
         )
         if "window_start" not in df.columns:
             raise ValueError(f"No window_start column found in data for ticker: `{ticker}`")
+
+        # Stitch in any predecessor symbol (ticker rename, e.g. QQQ ⇄ QQQQ) so a series split
+        # across a rename loads continuous instead of leaving a synthetic interpolated gap.
+        if asset_type == AssetType.STOCKS:
+            df = stitch_predecessors(self.data_dir, asset_type, ticker, df, date_start, date_end)
 
         df["timestamp_utc"] = pd.to_datetime(df["window_start"], unit="ns", utc=True)
         df = df.sort_values("timestamp_utc").set_index("timestamp_utc")

@@ -163,7 +163,7 @@ class OptionsPrices:
             split_ts = cast(pd.Timestamp, split_ts)
             if not self._is_handled_split_ratio(ratio):
                 print(
-                    f"⏭️  Skipping {ratio:.4f}-ratio event on {split_ts.date()}: "
+                    f"⛓️‍💥  Skipping {ratio:.4f}-ratio event on {split_ts.date()}: "
                     "likely a spinoff / distribution, not a stock split (no OCC support)"
                 )
                 continue
@@ -261,7 +261,7 @@ class OptionsPrices:
             return best[0]
         tgt = f"closest ${best[1]:.4f}" if best is not None else "no candidate"
         print(
-            f"🪚  No successor for {ticker} ({ratio:g}-for-1 on {split_date}; {tgt}); "
+            f"⛓️‍💥  No successor for {ticker} ({ratio:g}-for-1 on {split_date}; {tgt}); "
             f"standalone scale → ${new_strike:.4f}"
         )
         return direct

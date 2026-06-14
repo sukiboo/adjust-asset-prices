@@ -7,6 +7,7 @@ import pandas as pd
 import seaborn as sns
 import yfinance as yf
 
+from ..constants import YF_MAX_MISSING_RUN_SESSIONS
 from ..schemas import AssetType, ChecksConfig, PriceFileFormat
 from ..utils import build_target_index, save_prices, verify_saved_prices
 
@@ -179,6 +180,18 @@ def _yf_daily_close(
     return daily
 
 
+def _max_missing_run(our_index: pd.Index, yf_index: pd.Index) -> int:
+    """Longest contiguous run of our daily dates that yfinance has no data for. A large run means
+    our series contains a span yfinance can't corroborate (a wrong stitch or ticker); small
+    scattered gaps (yfinance hiccups, weekend forex) stay near zero."""
+    yf_dates = set(yf_index)
+    best = run = 0
+    for d in sorted(our_index):
+        run = run + 1 if d not in yf_dates else 0
+        best = max(best, run)
+    return best
+
+
 def compare_to_yf(
     df: pd.DataFrame,
     asset_type: AssetType,
@@ -198,10 +211,23 @@ def compare_to_yf(
     try:
         yf_daily = _yf_daily_close(ticker, asset_type, start_date, end_date, dividends_adjusted)
         if yf_daily is None:
-            print(f"⚠️ Warning: No yfinance data found for {ticker}")
+            print(
+                f"❌ {ticker}: yfinance has no data -- likely a retired/renamed ticker. "
+                f"Request the current symbol instead (e.g. META rather than FB) to get the "
+                f"full history; the rename's old-symbol bars are stitched in automatically."
+            )
             return False
 
-        comparison = pd.concat([_our_daily_close(df, asset_type), yf_daily], axis=1).dropna()
+        our_daily = _our_daily_close(df, asset_type)
+        missing_run = _max_missing_run(our_daily.index, yf_daily.index)
+        if missing_run > YF_MAX_MISSING_RUN_SESSIONS:
+            print(
+                f"❌ {ticker}: yfinance is missing {missing_run} consecutive sessions our data "
+                f"covers -- that span is uncorroborated (likely a wrong stitch), not saving."
+            )
+            return False
+
+        comparison = pd.concat([our_daily, yf_daily], axis=1).dropna()
         comparison.columns = ["our_close", "yf_close"]
         if comparison.empty:
             print("⚠️ Warning: No overlapping dates")
@@ -300,7 +326,7 @@ def _plot_comparison(
     ax2.grid(False)
 
     handles = [adj_line, yf_line, diff_line]
-    ax1.legend(handles, [str(h.get_label()) for h in handles], loc="upper left", framealpha=0.9)
+    ax1.legend(handles, [str(h.get_label()) for h in handles], loc="lower right", framealpha=0.9)
 
     ax1.set_title(f"{ticker} price comparison", fontsize=14, pad=12)
     fig.tight_layout()
