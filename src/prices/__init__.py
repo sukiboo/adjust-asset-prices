@@ -58,7 +58,9 @@ class Prices:
             confirm_on_fail=confirm_on_fail,
         )
         if options and saved:
-            calls, puts = self.options.get_options(ticker, date_start, date_end)
+            calls, puts = self.options.get_options(
+                ticker, date_start, date_end, predecessors=self.asset.predecessors
+            )
             saved = save_options_if_valid(
                 calls,
                 puts,

@@ -80,12 +80,15 @@ def quiet_get_options(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     # Option contracts plus the split-only underlying reference the gate needs, retrieved via
     # the same paths Prices.process uses (get_prices for the underlying, dividends off; then
-    # get_options for the contracts). Returns (calls, puts, underlying).
+    # get_options for the contracts, threading any rename predecessors get_prices discovered).
+    # Returns (calls, puts, underlying).
     with quiet_output():
         underlying_df, _ = prices.asset.get_prices(
             underlying, date_start, date_end, dividends=False
         )
-        calls, puts = prices.options.get_options(underlying, date_start, date_end)
+        calls, puts = prices.options.get_options(
+            underlying, date_start, date_end, predecessors=prices.asset.predecessors
+        )
     return calls, puts, underlying_df
 
 

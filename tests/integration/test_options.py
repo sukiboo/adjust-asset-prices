@@ -277,3 +277,40 @@ def test_vxx_2023_multi_reverse_split(options_prices: Prices) -> None:
         f"✔️  VXX back-adjusted underlying median: ${ref_level:.2f} (×16 ~ $180, ×4-only ~ $45), "
         f"successor strike ${strike:.2f}"
     )
+
+
+# --- Ticker renames ---------------------------------------------------------------------------
+# A rename (FB→META) is a degenerate split: same strike/expiry, premium unchanged, only the OSI
+# root differs. The stock-side auto-stitch discovers the predecessor (FB) and the options pass
+# loads its O:FB… contracts and rewrites them to the live O:META… root, so a contract spanning the
+# rename loads as one continuous series. Unlike a split there is NO premium rescale, so this can't
+# use a ~1 continuity probe; the check is unification (a deep-ITM call with REAL trades on BOTH
+# sides of the rename exists only because FB bars were rewritten under META) plus the gate.
+
+
+@pytest.mark.integration
+def test_meta_2022_rename_unify(options_prices: Prices) -> None:
+    # FB→META rename (2022-06-09). date_start is >30 NYSE sessions before the rename so the
+    # leading-gap auto-stitch fires and discovers FB; get_options then loads + rewrites O:FB…
+    # contracts to O:META…. Asserts no FB roots survive, a deep-ITM META call spans the rename with
+    # real trades both sides (proving the rewrite + merge), a premium-neutral ratio (no rescale),
+    # and the structural gate (which ties pre-rename premiums to the FB-era stitched underlying).
+    calls, puts, ref = quiet_get_options(options_prices, "META", "2022-04-25", "2022-06-10")
+    _describe_options(calls, puts, "META")
+    assert not calls.empty and not puts.empty, "❌ expected both META calls and puts in range"
+
+    roots = {parse_osi_ticker(t).underlying for t in _tickers(calls) | _tickers(puts)}
+    fb_roots = sorted(r for r in roots if r == "FB" or (r.startswith("FB") and r[2:].isdigit()))
+    assert not fb_roots, f"❌ predecessor FB roots not rewritten to META: {fb_roots}"
+
+    succ = _busiest_spanning_call(calls, "META", "2022-06-09", ref=ref)
+    assert succ is not None, "❌ no deep-ITM META call spans the rename — FB options not unified"
+    pre, post = _real_continuity(calls, succ, "2022-06-09")
+    ratio = pre / post
+    print(f"🔗  META {succ}: pre=${pre:.4f}, post=${post:.4f}, ratio={ratio:.4f} (premium-neutral)")
+    # A rename leaves the premium unscaled (it only tracks the underlying), so pre/post is near 1 —
+    # not an integer split factor. The loose band absorbs the underlying's move over the volatile
+    # 06-08 → 06-10 week while still catching an accidental ratio rescale.
+    assert 0.5 < ratio < 2.0, f"❌ rename appears to have rescaled the premium (ratio {ratio:.3f})"
+
+    assert quiet_check_options(calls, puts, "META", ref), "❌ META structural gate failed"

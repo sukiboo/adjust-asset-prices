@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 from ..aliases import stitch_predecessors
-from ..schemas import AssetType
+from ..schemas import AssetType, Predecessor
 from ..utils import (
     build_target_index,
     check_data_dir,
@@ -25,6 +25,9 @@ class AssetPrices:
 
     def __init__(self, data_dir: str) -> None:
         self.data_dir, self.asset_types = check_data_dir(data_dir)
+        # Predecessors discovered by the last `load_prices` (ticker renames, stocks only); read by
+        # `Prices.process` to stitch the same renames onto the options pass. Empty when none/non-stock.
+        self.predecessors: list[Predecessor] = []
 
     def get_prices(
         self,
@@ -54,9 +57,13 @@ class AssetPrices:
             raise ValueError(f"No window_start column found in data for ticker: `{ticker}`")
 
         # Stitch in any predecessor symbol (ticker rename, e.g. QQQ ⇄ QQQQ) so a series split
-        # across a rename loads continuous instead of leaving a synthetic interpolated gap.
+        # across a rename loads continuous instead of leaving a synthetic interpolated gap. The
+        # discovered predecessors are cached so the options pass can stitch the same renames.
+        self.predecessors = []
         if asset_type == AssetType.STOCKS:
-            df = stitch_predecessors(self.data_dir, asset_type, ticker, df, date_start, date_end)
+            df, self.predecessors = stitch_predecessors(
+                self.data_dir, asset_type, ticker, df, date_start, date_end
+            )
 
         df["timestamp_utc"] = pd.to_datetime(df["window_start"], unit="ns", utc=True)
         df = df.sort_values("timestamp_utc").set_index("timestamp_utc")

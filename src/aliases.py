@@ -7,7 +7,7 @@ import pandas as pd
 import pandas_market_calendars as mcal
 
 from .constants import ALIAS_INTERNALS
-from .schemas import AssetType
+from .schemas import AssetType, Predecessor
 from .utils import (
     get_files_in_range,
     load_symbol_rows,
@@ -180,13 +180,15 @@ def stitch_predecessors(
     base_raw: pd.DataFrame,
     date_start: str | None = None,
     date_end: str | None = None,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, list[Predecessor]]:
     """Append predecessor-symbol rows to `base_raw` so a series split across ticker renames (e.g.
     QQQ⇄QQQQ) loads as one continuous instrument. Each large gap (interior or leading vs
     `date_start`) is resolved by `_find_predecessor` and spliced in; the scan repeats to unwind a
     multi-rename chain one link at a time, with a visited-set guarding symbol-reuse loops. Concat +
     window_start dedup keeps the series gap-free and unique; the ticker label is dropped downstream
-    so output stays under the requested (live) ticker."""
+    so output stays under the requested (live) ticker. Returns the merged frame and the list of
+    spliced `Predecessor`s (former symbol + span) so the options pass can stitch the same renames
+    onto its OSI contracts."""
     start = parse_date(date_start, "2000-01-01")
     end = parse_date(date_end)
     files_by_date = _files_by_date(get_files_in_range(Path(data_dir), asset_type.value, start, end))
@@ -196,6 +198,7 @@ def stitch_predecessors(
 
     visited = {normalize_ticker(ticker, asset_type)}
     combined = base_raw
+    predecessors: list[Predecessor] = []
     while True:
         have = _et_dates(combined)
         gaps = _find_large_gaps(have, min_gap, lower_bound)
@@ -217,6 +220,7 @@ def stitch_predecessors(
                 )
                 combined = kept
                 break  # re-derive gaps on the cleaned series
+            pred_dates = _et_dates(rows)
             print(
                 f"🔗  {ticker}: stitched predecessor {pred} over {gap_start} -- {gap_end} "
                 f"({len(rows):,} rows)"
@@ -224,10 +228,11 @@ def stitch_predecessors(
             combined = pd.concat([combined, rows], ignore_index=True).drop_duplicates(
                 subset="window_start", keep="first"
             )
+            predecessors.append(Predecessor(pred, pred_dates[0], pred_dates[-1]))
             visited.add(pred)
             break  # recompute gaps from scratch — the stitch may expose an earlier link
         else:
             for gs, ge in gaps:
                 print(f"⛓️‍💥  {ticker}: gap {gs} -- {ge} has no recoverable predecessor")
             break
-    return combined
+    return combined, predecessors

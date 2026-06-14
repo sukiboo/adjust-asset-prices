@@ -173,6 +173,14 @@ Two things hold across every asset type:
   connects only on the resume side — so the discontinuous pre-gap segment is dropped as foreign.
   `META` thus loads as clean Facebook history (and `--date-start` before the rename pulls FB's
   earlier history back as a normal stitch).
+- **A simultaneous rename + split is _not_ stitched** (a deliberate limitation). Real cases are
+  almost all distressed reverse-split listing-compliance rebrands (e.g. Sacks Parente `SPGC` →
+  Newton Golf `NWTG`, 1-for-30), where the price moves so much across the split that the former
+  symbol can't be matched by price — and a coincidental look-alike that stopped at the same time
+  often sits closer to the split-adjusted price than the true predecessor does. Rather than risk a
+  wrong splice, the stitch bails: the ticker loads from its rename date forward (no pre-rename
+  history), which still passes the yfinance check. Resolving this would need an external rename
+  source, not price-matching.
 
 ### Options
 
@@ -184,6 +192,11 @@ Two things hold across every asset type:
   pipeline runs its stocks pass first, then loads every OSI contract on it (including OCC
   numeric-suffix roots like `AAPL7`), OCC-adjusts for splits (premium ÷ ratio *and* OSI symbol
   rewrite), backfills by holding the last trade flat to expiry, validates, and saves.
+- **Ticker renames carry through to the contracts.** A predecessor the underlying's rename
+  auto-stitch (above) discovers also feeds the options pass: its `O:<former-root>…` contracts
+  (e.g. `O:FB…` when you request META) are loaded over the predecessor's span and rewritten to the
+  live OSI root, so a contract spanning the rename loads as one continuous series. A rename leaves
+  the premium unchanged — only the root differs — so, unlike a split, there is no rescale.
 - **Never dividend-adjusted**, and `--options`/`--dividends` are mutually exclusive: the quality
   gate needs the underlying as it actually traded, and dividends are priced into premiums rather
   than back-adjusted out.

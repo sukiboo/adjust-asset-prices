@@ -85,3 +85,15 @@ class OSIContract(NamedTuple):
     expiry: date
     option_type: Literal["C", "P"]
     strike: float
+
+
+class Predecessor(NamedTuple):
+    """A former ticker discovered by the rename auto-stitch (e.g. FB before FB→META). `symbol`
+    is also the predecessor's OSI option root (`FB` ⇄ `O:FB…`), and `[start, end]` is the span
+    over which we hold its bars. The options pass loads `O:<symbol>…` contracts bounded to this
+    span (so a reused ticker can't leak in) and rewrites them to the live root for continuity.
+    """
+
+    symbol: str
+    start: date
+    end: date

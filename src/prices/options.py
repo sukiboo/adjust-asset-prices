@@ -1,10 +1,12 @@
+from collections.abc import Sequence
 from datetime import date
 from typing import Literal, cast
 
+import numpy as np
 import pandas as pd
 
 from ..constants import OPTIONS_INTERNALS
-from ..schemas import AssetType, OSIContract
+from ..schemas import AssetType, OSIContract, Predecessor
 from ..utils import (
     build_target_index,
     describe_adjusted_options,
@@ -12,6 +14,7 @@ from ..utils import (
     format_osi_ticker,
     load_options_data,
     parse_osi_ticker,
+    underlying_matches,
 )
 from .assets import AssetPrices
 
@@ -29,28 +32,52 @@ class OptionsPrices:
         self.data_dir = asset.data_dir
 
     def get_options(
-        self, underlying: str, date_start: str | None = None, date_end: str | None = None
+        self,
+        underlying: str,
+        date_start: str | None = None,
+        date_end: str | None = None,
+        predecessors: Sequence[Predecessor] = (),
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """Retrieve `underlying`'s option contracts as `(calls, puts)`: load → split-unify →
-        backfill. The options-side mirror of `AssetPrices.get_prices`; the underlying series the
-        gate compares against is retrieved separately (split-only, via `get_prices`).
+        """Retrieve `underlying`'s option contracts as `(calls, puts)`: load → rename-unify →
+        split-unify → backfill. The options-side mirror of `AssetPrices.get_prices`; the underlying
+        series the gate compares against is retrieved separately (split-only, via `get_prices`).
+        `predecessors` are former ticker symbols (from the stock-side rename auto-stitch) whose
+        OSI contracts are loaded and rewritten to the live root, so series spanning a rename load
+        continuous.
         """
-        calls, puts = self.load_options(underlying, date_start, date_end)
+        calls, puts = self.load_options(underlying, date_start, date_end, predecessors)
         print("⚙️  Adjusting options contracts...")
+        calls, puts = self.unify_rename_symbols(calls, puts, underlying, predecessors)
         calls, puts = self.adjust_options_splits(calls, puts, underlying)
         calls, puts = self.backfill_options(calls, puts)
         describe_adjusted_options(calls, puts, underlying)
         return calls, puts
 
     def load_options(
-        self, underlying: str, date_start: str | None = None, date_end: str | None = None
+        self,
+        underlying: str,
+        date_start: str | None = None,
+        date_end: str | None = None,
+        predecessors: Sequence[Predecessor] = (),
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
         """Load raw option bars for `underlying`, partitioned into (calls, puts), each
         multi-indexed on `(timestamp_utc, ticker)` with a `close` column. I/O + reshape only
-        (backfill / adjust / gate are downstream); either side may be empty.
+        (backfill / adjust / gate are downstream); either side may be empty. Each `predecessor`'s
+        `O:<symbol>…` contracts are loaded too, bounded to its span so a reused ticker can't leak.
         """
         print(f"\n⛏️  Loading options for {underlying}...")
-        df = load_options_data(self.data_dir, underlying, date_start, date_end)
+        frames = [load_options_data(self.data_dir, underlying, date_start, date_end)]
+        for pred in predecessors:
+            try:
+                frames.append(
+                    load_options_data(
+                        self.data_dir, pred.symbol, pred.start.isoformat(), pred.end.isoformat()
+                    )
+                )
+                print(f"⛏️  Loaded predecessor {pred.symbol} options ({pred.start} -- {pred.end})")
+            except ValueError:
+                print(f"⚠️  No predecessor {pred.symbol} options in {pred.start} -- {pred.end}")
+        df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
         df["timestamp_utc"] = pd.to_datetime(df["window_start"], unit="ns", utc=True)
         df = df[["timestamp_utc", "ticker", "close"]]
 
@@ -187,27 +214,95 @@ class OptionsPrices:
             return df
 
         rewrites = self._successor_symbols(df, split_ts, ratio, underlying)
-        pre, post = df[pre_mask].copy(), df[~pre_mask]
-        pre["close"] /= ratio
-        pre.index = pd.MultiIndex.from_arrays(
-            [
-                pre.index.get_level_values("timestamp_utc"),
-                pre.index.get_level_values("ticker").map(rewrites),
-            ],
-            names=["timestamp_utc", "ticker"],
-        )
-        # The raw feed double-emits a contract under both its base and a suffixed OCC root on
-        # the transition day; after rewriting, the twins collide on one (ts, ticker) — keep one.
-        merged = pd.concat([post, pre]).sort_index()
-        deduped = merged[~merged.index.duplicated(keep="first")]
-
-        n_twins = len(merged) - len(deduped)
+        deduped, n_twins = self._relabel_and_merge(df, pre_mask, rewrites, scale=ratio)
         print(
             f"🪚  {ratio:g}-for-1 split on {split_ts.date()}: rewrote {len(rewrites):,}"
             f" {side} contracts / {int(pre_mask.sum()):,} rows"
             + (f", deduped {n_twins:,} twin rows" if n_twins else "")
         )
         return deduped
+
+    def _relabel_and_merge(
+        self, df: pd.DataFrame, mask: np.ndarray, rewrites: dict[str, str], scale: float = 1.0
+    ) -> tuple[pd.DataFrame, int]:
+        """Relabel the `mask`-selected rows' ticker level via `rewrites` (rescaling their `close`
+        by 1/`scale`), merge back with the rest, and dedup any (ts, ticker) twins the raw feed
+        emits on a transition day — the unmasked/native rows win. Shared by the split rewrite
+        (scale=ratio, mask=pre-split bars) and the rename rewrite (scale=1, mask=predecessor-root
+        bars). Returns the deduped frame and the twin-row count dropped.
+        """
+        sel, rest = df[mask].copy(), df[~mask]
+        if scale != 1.0:
+            sel["close"] /= scale
+        sel.index = pd.MultiIndex.from_arrays(
+            [
+                sel.index.get_level_values("timestamp_utc"),
+                sel.index.get_level_values("ticker").map(rewrites),
+            ],
+            names=["timestamp_utc", "ticker"],
+        )
+        merged = pd.concat([rest, sel]).sort_index()
+        deduped = merged[~merged.index.duplicated(keep="first")]
+        return deduped, len(merged) - len(deduped)
+
+    def unify_rename_symbols(
+        self,
+        calls: pd.DataFrame,
+        puts: pd.DataFrame,
+        underlying: str,
+        predecessors: Sequence[Predecessor],
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Rewrite predecessor-root contracts (e.g. `O:FB…`) to the live root (`O:META…`) so a
+        contract spanning a ticker rename loads as one continuous series. A rename is a degenerate
+        split — same strike/expiry, premium unchanged, only the root differs — so it reuses the
+        split relabel+merge primitive with no premium scaling. Runs before `adjust_options_splits`
+        so the split-unifier sees a single root namespace. No-op when there are no predecessors.
+        """
+        if not predecessors:
+            return calls, puts
+        return (
+            self._unify_rename_side(calls, underlying, predecessors, "call"),
+            self._unify_rename_side(puts, underlying, predecessors, "put"),
+        )
+
+    def _unify_rename_side(
+        self,
+        df: pd.DataFrame,
+        underlying: str,
+        predecessors: Sequence[Predecessor],
+        side: OptionSide,
+    ) -> pd.DataFrame:
+        if df.empty:
+            return df
+        rewrites: dict[str, str] = {}
+        for t in df.index.get_level_values("ticker").unique():
+            new = self._rename_ticker(cast(str, t), underlying, predecessors)
+            if new is not None:
+                rewrites[cast(str, t)] = new
+        if not rewrites:
+            return df
+        mask = df.index.get_level_values("ticker").isin(list(rewrites))
+        deduped, n_twins = self._relabel_and_merge(df, mask, rewrites)
+        print(
+            f"🔗  Rename-unified {len(rewrites):,} predecessor {side} contracts to {underlying}"
+            + (f", deduped {n_twins:,} twin rows" if n_twins else "")
+        )
+        return deduped
+
+    def _rename_ticker(
+        self, ticker: str, underlying: str, predecessors: Sequence[Predecessor]
+    ) -> str | None:
+        """The live-root symbol a predecessor-root `ticker` rewrites to (root swapped, OCC numeric
+        suffix preserved, strike/expiry/type intact); None if `ticker` is not on a predecessor root.
+        """
+        parsed = parse_osi_ticker(ticker)
+        for pred in predecessors:
+            if underlying_matches(parsed.underlying, pred.symbol):
+                new_root = underlying + parsed.underlying[len(pred.symbol) :]  # keep OCC suffix
+                return format_osi_ticker(
+                    OSIContract(new_root, parsed.expiry, parsed.option_type, parsed.strike)
+                )
+        return None
 
     def _successor_symbols(
         self, df: pd.DataFrame, split_ts: pd.Timestamp, ratio: float, underlying: str
