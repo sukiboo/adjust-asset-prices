@@ -107,7 +107,9 @@ class AssetPrices:
 
         df = df.copy()
         for split_date, ratio in splits.items():
-            ts = cast(pd.Timestamp, split_date)
+            # ET-midnight, same as adjust_for_dividends: yfinance >=1.x stamps the split index at
+            # 09:30 ET, so a raw `< ts` would divide the ex-date's own pre-market bars by the ratio.
+            ts = cast(pd.Timestamp, split_date).tz_convert("America/New_York").normalize()
             df.loc[df.index < ts, ticker] /= ratio
             print(f"🪚  Applied {ratio:g}-for-1 split on {ts.date()} to {ticker}")
         return df
@@ -171,7 +173,9 @@ class AssetPrices:
         )
         df = df.copy()
         for ex_date, amount in divs.items():
-            ts = cast(pd.Timestamp, ex_date)
+            # ET-midnight ex-date: yfinance >=1.x stamps the dividend index at 09:30 ET (not
+            # midnight), so a raw `< ts` would pick the ex-date's own post-drop close as prev_close.
+            ts = cast(pd.Timestamp, ex_date).tz_convert("America/New_York").normalize()
             mask = df.index < ts
             if not mask.any():
                 continue
