@@ -2,6 +2,7 @@ import os
 import re
 import sys
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from pathlib import Path
 from typing import Literal, Tuple, cast
@@ -11,7 +12,7 @@ import pandas as pd
 import pandas_market_calendars as mcal
 import yfinance as yf
 
-from .constants import DATA_SOURCE_URL, OPTIONS_INTERNALS
+from .constants import DATA_SOURCE_URL, OPTIONS_INTERNALS, READ_MAX_WORKERS
 from .schemas import (
     ASSET_TYPE_CONFIG,
     ASSET_TYPES,
@@ -229,6 +230,18 @@ def read_gz(path: Path, cols: list[str] | None = None) -> pd.DataFrame:
         return pd.read_csv(path, compression="gzip", usecols=cols)
 
 
+def _read_files_concat(
+    files: list[Path], extract: Callable[[pd.DataFrame], pd.DataFrame]
+) -> list[pd.DataFrame]:
+    """Read each gzipped daily file and apply `extract` (a per-file row filter), in parallel,
+    returning the non-empty results in file order. pyarrow's reader releases the GIL during the
+    read (the bulk of load time), so a thread pool parallelizes it; `map` preserves file order.
+    """
+    with ThreadPoolExecutor(max_workers=READ_MAX_WORKERS) as ex:
+        results = ex.map(lambda p: extract(read_gz(p)), files)
+    return [df for df in results if not df.empty]
+
+
 def determine_asset_type(
     data_dir: Path,
     asset_types: list[str],
@@ -281,21 +294,19 @@ def load_options_data(
         raise ValueError(f"No options files in range {start}..{end}")
 
     prefilter = rf"O:{re.escape(underlying)}\d"
-    dfs = []
-    for file_path in files_in_range:
-        df = read_gz(file_path)
+
+    def extract(df: pd.DataFrame) -> pd.DataFrame:
         candidates = df[df["ticker"].str.match(prefilter, na=False)]
         if candidates.empty:
-            continue
+            return candidates
         matching = {
             t
             for t in candidates["ticker"].unique()
             if underlying_matches(parse_osi_ticker(t).underlying, underlying)
         }
-        if not matching:
-            continue
-        dfs.append(candidates[candidates["ticker"].isin(matching)])
+        return candidates[candidates["ticker"].isin(matching)]
 
+    dfs = _read_files_concat(files_in_range, extract)
     if not dfs:
         raise ValueError(
             f"No option contracts found for underlying `{underlying}` in {start}..{end}"
@@ -308,13 +319,7 @@ def load_symbol_rows(files: list[Path], symbol: str) -> pd.DataFrame:
     Returns an empty frame if the symbol appears in none of them — callers decide if that's an
     error. Shared by `load_ticker_data` and the alias stitcher (which loads predecessor symbols).
     """
-    dfs = []
-    for file_path in files:
-        df = read_gz(file_path)
-        rows = df[df["ticker"] == symbol]
-        if not rows.empty:
-            dfs.append(rows)
-
+    dfs = _read_files_concat(files, lambda df: df[df["ticker"] == symbol])
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
 

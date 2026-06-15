@@ -34,10 +34,11 @@ DateLike = str | date | datetime | pd.Timestamp | None
 
 
 class ChecksConfig(TypedDict):
-    """Per-asset comparison thresholds used by `compare_to_yf`."""
+    """Per-asset thresholds for the single-series `compare_to_yf` gate."""
 
     abs_rel_diff_pct_p50: float
     abs_rel_diff_pct_p99: float
+    yf_max_missing_run_sessions: int  # max contiguous sessions yfinance may be missing (coverage)
 
 
 class OptionsChecksConfig(TypedDict):

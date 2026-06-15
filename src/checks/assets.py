@@ -7,7 +7,6 @@ import pandas as pd
 import seaborn as sns
 import yfinance as yf
 
-from ..constants import YF_MAX_MISSING_RUN_SESSIONS
 from ..schemas import AssetType, ChecksConfig, PriceFileFormat
 from ..utils import build_target_index, save_prices, verify_saved_prices
 
@@ -34,6 +33,7 @@ def check_prices(
             asset_type=asset_type,
             abs_rel_diff_pct_p50=thresholds["abs_rel_diff_pct_p50"],
             abs_rel_diff_pct_p99=thresholds["abs_rel_diff_pct_p99"],
+            yf_max_missing_run_sessions=thresholds["yf_max_missing_run_sessions"],
             show_plot=show_plot,
             dividends_adjusted=dividends_adjusted,
         )
@@ -197,6 +197,7 @@ def compare_to_yf(
     asset_type: AssetType,
     abs_rel_diff_pct_p50: float,
     abs_rel_diff_pct_p99: float,
+    yf_max_missing_run_sessions: int,
     show_plot: bool,
     dividends_adjusted: bool,
 ) -> bool:
@@ -220,7 +221,7 @@ def compare_to_yf(
 
         our_daily = _our_daily_close(df, asset_type)
         missing_run = _max_missing_run(our_daily.index, yf_daily.index)
-        if missing_run > YF_MAX_MISSING_RUN_SESSIONS:
+        if missing_run > yf_max_missing_run_sessions:
             print(
                 f"❌ {ticker}: yfinance is missing {missing_run} consecutive sessions our data "
                 f"covers -- that span is uncorroborated (likely a wrong stitch), not saving."

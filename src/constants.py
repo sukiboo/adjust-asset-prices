@@ -7,24 +7,43 @@ DEFAULT_DATA_DIR = "./data/files"
 DEFAULT_SAVE_DIR = "./data/prices"
 DEFAULT_SHOW_PLOT = False
 
+# Thread pool size for the per-file raw-data reads (load_symbol_rows / load_options_data).
+# pyarrow's CSV reader releases the GIL during decompress+parse, so threads give real
+# parallelism here (~3.5x on the read-bound load); empirically saturates around 8 workers.
+READ_MAX_WORKERS = 8
+
 # Where users can get the raw daily price files when they have none locally (pre-built daily
 # files for all asset types through 2026). Surfaced by `check_data_dir` in the no-data error.
 DATA_SOURCE_URL = "https://www.dropbox.com/scl/fo/xd5a5s5cwa0imf6gvplzv/AL1ffzRw3_AEfeEwRoKLQms?rlkey=ah6c8ps5zvco29npoeoro831k&dl=0"
 
+# Per-asset thresholds for the single-series compare-to-yf gate (stocks/crypto/forex), tuned per
+# asset to absorb upstream yfinance noise (stocks tight, crypto/forex looser). `abs_rel_diff_pct_*`
+# gate the |our − yf| daily-close % (median / p99). `yf_max_missing_run_sessions` is the coverage
+# guard: fail if our series has a contiguous run longer than this of sessions yfinance has no data
+# for — an uncorroborated span (e.g. a wrong stitch). Small scattered gaps stay well under it.
 CHECKS_CONFIG: dict[AssetType, ChecksConfig] = {
-    AssetType.STOCKS: {"abs_rel_diff_pct_p50": 0.05, "abs_rel_diff_pct_p99": 0.5},
-    AssetType.CRYPTO: {"abs_rel_diff_pct_p50": 0.1, "abs_rel_diff_pct_p99": 1.5},
-    AssetType.FOREX: {"abs_rel_diff_pct_p50": 0.05, "abs_rel_diff_pct_p99": 0.5},
+    AssetType.STOCKS: {
+        "abs_rel_diff_pct_p50": 0.05,
+        "abs_rel_diff_pct_p99": 0.5,
+        "yf_max_missing_run_sessions": 10,
+    },
+    AssetType.CRYPTO: {
+        "abs_rel_diff_pct_p50": 0.1,
+        "abs_rel_diff_pct_p99": 1.5,
+        "yf_max_missing_run_sessions": 10,
+    },
+    AssetType.FOREX: {
+        "abs_rel_diff_pct_p50": 0.05,
+        "abs_rel_diff_pct_p99": 0.5,
+        "yf_max_missing_run_sessions": 10,
+    },
 }
+
+# Thresholds for the options structural (no-arb) gate. Both are percentages.
 OPTIONS_CHECKS_CONFIG: OptionsChecksConfig = {
     "noarb_violation_pct_p99": 1.0,  # gate fails when p99 no-arb breach (% of spot) exceeds this
     "deep_itm_intrinsic_pct": 50.0,  # exclude bars with intrinsic > this% of spot from the bounds
 }
-
-# compare_to_yf coverage guard: fail if our series has a contiguous run longer than this of trading
-# sessions that yfinance has no data for — that span is uncorroborated (a wrong stitch or ticker).
-# Small scattered gaps (yfinance hiccups, weekend forex) are well under this and pass.
-YF_MAX_MISSING_RUN_SESSIONS = 10
 
 # Ticker-rename auto-stitch tuning (stocks only). A long gap in a live ticker's raw history
 # (interior, or leading vs date_start) means it likely traded under a former symbol — e.g. QQQ
