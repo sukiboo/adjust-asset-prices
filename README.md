@@ -39,8 +39,9 @@ python run.py <TICKER> [OPTIONS]
 
 End-to-end pipeline for one ticker: load raw bars → backfill missing minutes → adjust for
 splits (and optionally cash dividends; stocks only, using yfinance metadata) → run sanity
-checks → save to `./data/prices/<TICKER>_<start>_<end>.<format>` (the date range is taken
-from the saved series' own index) → reload and verify the round-trip.
+checks → save to `./data/prices/<TICKER>[_dividends]_<start>_<end>.<format>` (the date range is
+taken from the saved series' own index; the `_dividends` tag marks a dividend-adjusted series)
+→ reload and verify the round-trip.
 
 Tickers are unprefixed and the asset type is auto-detected from your local data: `BTC-USD`
 (crypto), `EUR-USD` (forex), `AAPL` (stock). For `--options`, pass the **underlying** (`AAPL`),
@@ -57,7 +58,7 @@ Options:
 | `--date-end`    | (latest)         | inclusive end date, `YYYY-MM-DD`                     |
 | `--dividends`   | off              | also back-adjust stocks for cash dividends           |
 | `--options`     | off              | also fetch the underlying's option contracts         |
-| `--plot`        | off              | display the price-comparison plot against yfinance   |
+| `--plot`        | off              | plot the price comparison vs yfinance, with splits/renames/dividends marked |
 | `--force`       | off              | save even if the price checks fail                  |
 
 `--dividends` and `--options` are mutually exclusive: the default output is the actual
@@ -95,9 +96,10 @@ Files are written to `--save-dir` (default `./data/prices/`), then reloaded and 
 memory to verify the round-trip. The `<start>_<end>` range (`YYYYMMDD`) is taken from the saved
 frame's own index.
 
-- **Stocks / crypto / forex** — one file `<TICKER>_<start>_<end>.<format>`
-  (e.g. `BTC-USD_20240101_20241231.parquet`): a 1-minute `timestamp_utc` index (UTC) and a single
-  price column named after the ticker.
+- **Stocks / crypto / forex** — one file `<TICKER>[_dividends]_<start>_<end>.<format>`
+  (e.g. `BTC-USD_20240101_20241231.parquet`, or `SPY_dividends_20200101_20231231.parquet` for a
+  `--dividends` run): a 1-minute `timestamp_utc` index (UTC) and a single price column named after
+  the ticker. The `_dividends` tag distinguishes a total-return series from the default split-only one.
 - **Options** — two files under an `options/` subfolder,
   `options/<UNDERLYING>_<start>_<end>_{calls,puts}.<format>`: a `(timestamp_utc, ticker)`
   multi-index and a single `close` column (one row per contract per minute).
@@ -171,8 +173,10 @@ Two things hold across every asset type:
   its FB→META rename), the loader picks up that foreign history along with the real series. The
   stitcher detects it: a genuine rename connects on *both* edges of the gap, but a reused ticker
   connects only on the resume side — so the discontinuous pre-gap segment is dropped as foreign.
-  `META` thus loads as clean Facebook history (and `--date-start` before the rename pulls FB's
-  earlier history back as a normal stitch).
+  The real predecessor it matched is then stitched in full, so `run.py META` (no `--date-start`)
+  drops the Meta-Materials head **and** pulls all of FB's history back, giving the complete
+  continuous Facebook series — exactly what "give me META" should mean. A `--date-start` simply
+  caps how far back FB is pulled.
 - **A simultaneous rename + split is _not_ stitched** (a deliberate limitation). Real cases are
   almost all distressed reverse-split listing-compliance rebrands (e.g. Sacks Parente `SPGC` →
   Newton Golf `NWTG`, 1-for-30), where the price moves so much across the split that the former

@@ -1,10 +1,11 @@
+from datetime import date, timedelta
 from typing import cast
 
 import numpy as np
 import pandas as pd
 
 from ..aliases import stitch_predecessors
-from ..schemas import AssetType, Predecessor
+from ..schemas import AssetType, Predecessor, PriceEvent
 from ..utils import (
     build_target_index,
     check_data_dir,
@@ -18,6 +19,27 @@ from ..utils import (
 )
 
 
+def _rename_events(
+    ticker: str, predecessors: list[Predecessor], first: date, last: date
+) -> list[PriceEvent]:
+    """Rename markers at each symbol changeover in the stitched timeline (predecessor eras
+    bracketed by the ticker): interior QQQ→QQQQ→QQQ yields two, leading FB→META yields one."""
+    segments: list[tuple[date, str]] = []
+    cursor = first
+    for p in sorted(predecessors, key=lambda x: x.start):
+        if cursor < p.start:
+            segments.append((cursor, ticker))
+        segments.append((p.start, p.symbol))
+        cursor = p.end + timedelta(days=1)
+    if cursor <= last:
+        segments.append((cursor, ticker))
+    return [
+        PriceEvent(start, f"{a_sym}→{b_sym}", "rename")
+        for (_, a_sym), (start, b_sym) in zip(segments, segments[1:])
+        if a_sym != b_sym
+    ]
+
+
 class AssetPrices:
     """Single-series pipeline (stocks, crypto, forex): load → adjust for splits → backfill
     → adjust for dividends. Sibling of `OptionsPrices`; both are composed by `Prices`.
@@ -28,6 +50,9 @@ class AssetPrices:
         # Predecessors discovered by the last `load_prices` (ticker renames, stocks only); read by
         # `Prices.process` to stitch the same renames onto the options pass. Empty when none/non-stock.
         self.predecessors: list[Predecessor] = []
+        # Corporate actions the last `get_prices` adjusted for (splits/renames/dividends), surfaced
+        # on the verification plot via `Prices.process`. Reflects what was actually applied.
+        self.events: list[PriceEvent] = []
 
     def get_prices(
         self,
@@ -40,7 +65,12 @@ class AssetPrices:
         `dividends` opts into cash-dividend back-adjustment (off by default — the saved series
         is then the actual split-adjusted traded price).
         """
+        self.events = []
         df, asset_type = self.load_prices(ticker, date_start, date_end)
+        if self.predecessors:
+            first = cast(pd.Timestamp, df.index[0]).tz_convert("America/New_York").date()
+            last = cast(pd.Timestamp, df.index[-1]).tz_convert("America/New_York").date()
+            self.events += _rename_events(ticker, self.predecessors, first, last)
         df = self.adjust_prices(df, asset_type, date_start, date_end, dividends)
         describe_adjusted_prices(df, ticker)
         return df, asset_type
@@ -118,6 +148,7 @@ class AssetPrices:
             # 09:30 ET, so a raw `< ts` would divide the ex-date's own pre-market bars by the ratio.
             ts = cast(pd.Timestamp, split_date).tz_convert("America/New_York").normalize()
             df.loc[df.index < ts, ticker] /= ratio
+            self.events.append(PriceEvent(ts.date(), f"{ratio:g}-for-1 split", "split"))
             print(f"🪚  Applied {ratio:g}-for-1 split on {ts.date()} to {ticker}")
         return df
 
@@ -193,6 +224,7 @@ class AssetPrices:
             prev_close = prev_closes.iloc[-1]
             factor = 1 - amount / prev_close
             df.loc[mask, ticker] *= factor
+            self.events.append(PriceEvent(ts.date(), f"${amount:.2f} dividend", "dividend"))
             print(
                 f"🔩 Applied ${amount:.4f} dividend on {ts.date()} "
                 f"(factor {factor:.6f}) to {ticker}"

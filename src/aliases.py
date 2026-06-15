@@ -183,12 +183,11 @@ def stitch_predecessors(
 ) -> tuple[pd.DataFrame, list[Predecessor]]:
     """Append predecessor-symbol rows to `base_raw` so a series split across ticker renames (e.g.
     QQQ⇄QQQQ) loads as one continuous instrument. Each large gap (interior or leading vs
-    `date_start`) is resolved by `_find_predecessor` and spliced in; the scan repeats to unwind a
-    multi-rename chain one link at a time, with a visited-set guarding symbol-reuse loops. Concat +
-    window_start dedup keeps the series gap-free and unique; the ticker label is dropped downstream
-    so output stays under the requested (live) ticker. Returns the merged frame and the list of
-    spliced `Predecessor`s (former symbol + span) so the options pass can stitch the same renames
-    onto its OSI contracts."""
+    `date_start`) is resolved by `_find_predecessor` and spliced in, re-scanning to unwind a
+    multi-rename chain one link at a time (visited-set guards symbol-reuse loops). A foreign
+    pre-gap segment (a *reused* ticker, e.g. Meta Materials before FB→META) is dropped and the
+    matched predecessor stitched in FULL, so `run.py META` recovers all the FB years even without
+    `--date-start`. Returns the merged frame + spliced `Predecessor`s for the options pass."""
     start = parse_date(date_start, "2000-01-01")
     end = parse_date(date_end)
     files_by_date = _files_by_date(get_files_in_range(Path(data_dir), asset_type.value, start, end))
@@ -213,17 +212,22 @@ def stitch_predecessors(
             if rows.empty:
                 continue
             if _pregap_is_foreign(combined, rows, gap_start, have, sanity):
+                # Reused ticker: drop the foreign pre-gap segment, then pull `pred`'s FULL history
+                # (not just the gap span) — once the head is gone the rename is a leading edge the
+                # gap scan can't re-find without a --date-start. `files_by_date` bounds the range.
                 kept = combined[_to_et(combined["window_start"]).dt.date > gap_end]
                 print(
                     f"🧹 {ticker}: dropped {len(combined) - len(kept):,} rows before {gap_start} "
                     f"(reused ticker -- another company held {ticker} there, unrelated to {pred})"
                 )
                 combined = kept
-                break  # re-derive gaps on the cleaned series
+                rows = load_symbol_rows([p for d, p in files_by_date.items() if d <= gap_end], pred)
+                if rows.empty:
+                    break
             pred_dates = _et_dates(rows)
             print(
-                f"🔗  {ticker}: stitched predecessor {pred} over {gap_start} -- {gap_end} "
-                f"({len(rows):,} rows)"
+                f"🔗 {ticker}: stitched predecessor {pred} over {pred_dates[0]} -- "
+                f"{pred_dates[-1]} ({len(rows):,} rows)"
             )
             combined = pd.concat([combined, rows], ignore_index=True).drop_duplicates(
                 subset="window_start", keep="first"
@@ -233,6 +237,12 @@ def stitch_predecessors(
             break  # recompute gaps from scratch — the stitch may expose an earlier link
         else:
             for gs, ge in gaps:
-                print(f"⛓️‍💥  {ticker}: gap {gs} -- {ge} has no recoverable predecessor")
+                print(f"⛓️‍💥 {ticker}: gap {gs} -- {ge} has no recoverable predecessor")
             break
+
+    # A later foreign-head drop can remove a region an earlier pass already stitched a predecessor
+    # into (e.g. GEN, held by 3 unrelated firms), orphaning it in the list. Keep only predecessors
+    # whose rows actually survive in the final series.
+    surviving = {str(t) for t in combined["ticker"].unique()}
+    predecessors = [p for p in predecessors if p.symbol in surviving]
     return combined, predecessors

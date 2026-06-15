@@ -55,6 +55,7 @@ class Prices:
             asset_type=asset_type,
             show_plot=show_plot,
             dividends_adjusted=dividends,
+            events=self.asset.events,
             confirm_on_fail=confirm_on_fail,
         )
         if options and saved:

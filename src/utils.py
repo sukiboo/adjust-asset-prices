@@ -413,20 +413,26 @@ def _date_range_suffix(start: pd.Timestamp, end: pd.Timestamp) -> str:
     return f"{parse_date(start):%Y%m%d}_{parse_date(end):%Y%m%d}"
 
 
-def _price_file_name(df: pd.DataFrame, format: PriceFileFormat) -> str:
-    """`<TICKER>_<start>_<end>.<format>`; the date range is taken from the frame's own index."""
+def _price_file_name(df: pd.DataFrame, format: PriceFileFormat, dividends: bool = False) -> str:
+    """`<TICKER>[_dividends]_<start>_<end>.<format>`; the date range is taken from the frame's own
+    index, and the `dividends` tag flags a dividend-adjusted (total-return) series so it isn't
+    confused with the default split-only one."""
     idx = cast(pd.DatetimeIndex, df.index)
     suffix = _date_range_suffix(cast(pd.Timestamp, idx.min()), cast(pd.Timestamp, idx.max()))
-    return f"{df.columns[0]}_{suffix}.{format}"
+    tag = "dividends_" if dividends else ""
+    return f"{df.columns[0]}_{tag}{suffix}.{format}"
 
 
 def save_prices(
-    df: pd.DataFrame, save_dir: str = "./data/prices", format: PriceFileFormat = "parquet"
+    df: pd.DataFrame,
+    save_dir: str = "./data/prices",
+    format: PriceFileFormat = "parquet",
+    dividends: bool = False,
 ) -> None:
-    """Save the prices to `<save_dir>/<TICKER>_<start>_<end>.<format>` (date range from the
-    frame's own index)."""
+    """Save the prices to `<save_dir>/<TICKER>[_dividends]_<start>_<end>.<format>` (date range
+    from the frame's own index; `dividends` tags a dividend-adjusted series)."""
     os.makedirs(save_dir, exist_ok=True)
-    save_path = os.path.join(save_dir, _price_file_name(df, format))
+    save_path = os.path.join(save_dir, _price_file_name(df, format, dividends))
     if format == "csv":
         df.to_csv(save_path, index=True)
     elif format == "parquet":
@@ -465,10 +471,12 @@ def load_prices(file_name: str, load_dir: str = "./data/prices") -> pd.DataFrame
         raise RuntimeError(f"Failed to load prices from `{file_path}`: {e}") from e
 
 
-def verify_saved_prices(df: pd.DataFrame, save_dir: str, format: PriceFileFormat) -> bool:
+def verify_saved_prices(
+    df: pd.DataFrame, save_dir: str, format: PriceFileFormat, dividends: bool = False
+) -> bool:
     """Reload the saved file and confirm it matches the in-memory data."""
     ticker = df.columns[0]
-    loaded = load_prices(_price_file_name(df, format), load_dir=save_dir)
+    loaded = load_prices(_price_file_name(df, format, dividends), load_dir=save_dir)
     values_match = np.allclose(df.values, loaded.values, equal_nan=True)
     index_match = df.index.equals(loaded.index)
     if not (values_match and index_match):

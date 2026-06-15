@@ -307,7 +307,7 @@ def test_meta_2022_rename_unify(options_prices: Prices) -> None:
     assert succ is not None, "❌ no deep-ITM META call spans the rename — FB options not unified"
     pre, post = _real_continuity(calls, succ, "2022-06-09")
     ratio = pre / post
-    print(f"🔗  META {succ}: pre=${pre:.4f}, post=${post:.4f}, ratio={ratio:.4f} (premium-neutral)")
+    print(f"🔗 META {succ}: pre=${pre:.4f}, post=${post:.4f}, ratio={ratio:.4f} (premium-neutral)")
     # A rename leaves the premium unscaled (it only tracks the underlying), so pre/post is near 1 —
     # not an integer split factor. The loose band absorbs the underlying's move over the volatile
     # 06-08 → 06-10 week while still catching an accidental ratio rescale.

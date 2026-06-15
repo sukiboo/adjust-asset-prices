@@ -1,13 +1,17 @@
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import cast
 
+import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 import pandas as pd
 import seaborn as sns
 import yfinance as yf
+from matplotlib.axes import Axes
+from matplotlib.lines import Line2D
+from matplotlib.typing import LineStyleType
 
-from ..schemas import AssetType, ChecksConfig, PriceFileFormat
+from ..schemas import AssetType, ChecksConfig, PriceEvent, PriceFileFormat
 from ..utils import build_target_index, save_prices, verify_saved_prices
 
 sns.set_theme(style="darkgrid", palette="muted", font="monospace", rc={"lines.linewidth": 2})
@@ -19,9 +23,11 @@ def check_prices(
     asset_type: AssetType,
     show_plot: bool,
     dividends_adjusted: bool,
+    events: Sequence[PriceEvent] = (),
 ) -> bool:
     """Collection of sanity checks for the price data. `dividends_adjusted` reflects whether
     `df` was dividend-adjusted, so `compare_to_yf` picks the matching yfinance convention.
+    `events` are corporate actions to mark on the verification plot (only used when `show_plot`).
     """
     print(f"\n🔍 Checking {df.columns[0]} price data...")
     thresholds = config[asset_type]
@@ -36,6 +42,7 @@ def check_prices(
             yf_max_missing_run_sessions=thresholds["yf_max_missing_run_sessions"],
             show_plot=show_plot,
             dividends_adjusted=dividends_adjusted,
+            events=events,
         )
     )
 
@@ -48,26 +55,29 @@ def save_if_valid(
     asset_type: AssetType,
     show_plot: bool,
     dividends_adjusted: bool,
+    events: Sequence[PriceEvent] = (),
     confirm_on_fail: Callable[[], bool] | None = None,
 ) -> bool:
     """Run checks; on success, save to disk and verify the round-trip. When checks fail,
     `confirm_on_fail` (if given) is invoked and the data is saved anyway iff it returns True —
     the CLI's interactive override. Default `None` keeps the strict "never save on fail"
-    behavior, so non-CLI callers (tests) are unaffected and never block on input."""
+    behavior, so non-CLI callers (tests) are unaffected and never block on input. `events` are
+    the corporate actions to mark on the verification plot (only used when `show_plot`)."""
     if not check_prices(
         df,
         config=config,
         asset_type=asset_type,
         show_plot=show_plot,
         dividends_adjusted=dividends_adjusted,
+        events=events,
     ):
         if confirm_on_fail is None or not confirm_on_fail():
             print("\n❌ Some checks failed, not saving the price data!")
             return False
     else:
         print("\n🎉 All checks passed, saving the price data...")
-    save_prices(df, save_dir=save_dir, format=format)
-    verify_saved_prices(df, save_dir=save_dir, format=format)
+    save_prices(df, save_dir=save_dir, format=format, dividends=dividends_adjusted)
+    verify_saved_prices(df, save_dir=save_dir, format=format, dividends=dividends_adjusted)
     return True
 
 
@@ -200,6 +210,7 @@ def compare_to_yf(
     yf_max_missing_run_sessions: int,
     show_plot: bool,
     dividends_adjusted: bool,
+    events: Sequence[PriceEvent] = (),
 ) -> bool:
     """Compare the price data to Yahoo Finance. `dividends_adjusted` must reflect whether
     `df` was dividend-adjusted, so we compare against the matching yfinance Close convention.
@@ -241,7 +252,7 @@ def compare_to_yf(
             diff_pct, diff_usd, abs_rel_diff_pct_p50, abs_rel_diff_pct_p99
         )
         if show_plot:
-            _plot_comparison(comparison, diff_pct, ticker, abs_rel_diff_pct_p99)
+            _plot_comparison(comparison, diff_pct, ticker, abs_rel_diff_pct_p99, events)
         return passed
 
     except Exception as e:
@@ -278,8 +289,52 @@ def _diff_passes_thresholds(
     return not fail
 
 
+# Marker style per event kind: (color, linestyle). Tailwind purple-500 / amber-500 / teal-500.
+_EVENT_STYLES: dict[str, tuple[str, LineStyleType]] = {
+    "split": ("#a855f7", "-."),
+    "rename": ("#f59e0b", "--"),
+    "dividend": ("#14b8a6", ":"),
+}
+_EVENT_LEGEND = {"split": "Splits", "rename": "Rename", "dividend": "Dividends"}
+
+
+def _mark_events(
+    ax: Axes, events: Sequence[PriceEvent], xmin: pd.Timestamp, xmax: pd.Timestamp
+) -> tuple[list[Line2D], list[str]]:
+    """Draw a vertical line per corporate action within [xmin, xmax]; annotate splits/renames
+    (few, informative) and leave dividends as faint unlabeled lines (often many). Returns one
+    legend proxy + label per event kind present."""
+    visible = [e for e in events if xmin <= pd.Timestamp(e.date) <= xmax]
+    for e in visible:
+        color, ls = _EVENT_STYLES[e.kind]
+        x = float(mdates.date2num(e.date))
+        ax.axvline(x, color=color, linestyle=ls, linewidth=1, alpha=0.6)
+        if e.kind != "dividend":
+            ax.annotate(
+                e.label,
+                xy=(x, 1),
+                xycoords=("data", "axes fraction"),
+                xytext=(3, -4),
+                textcoords="offset points",
+                rotation=90,
+                va="top",
+                ha="left",
+                fontsize=8,
+                color=color,
+            )
+    kinds = [k for k in _EVENT_STYLES if any(e.kind == k for e in visible)]
+    return [
+        Line2D([0], [0], color=_EVENT_STYLES[k][0], linestyle=_EVENT_STYLES[k][1], linewidth=1.5)
+        for k in kinds
+    ], [_EVENT_LEGEND[k] for k in kinds]
+
+
 def _plot_comparison(
-    comparison: pd.DataFrame, diff_pct: pd.Series, ticker: str, diff_ylim: float
+    comparison: pd.DataFrame,
+    diff_pct: pd.Series,
+    ticker: str,
+    diff_threshold: float,
+    events: Sequence[PriceEvent] = (),
 ) -> None:
     # Tailwind blue-500 / green-500 / red-400.
     price_adj, price_yf, diff_color = "#3b82f6", "#22c55e", "#f87171"
@@ -291,7 +346,7 @@ def _plot_comparison(
         comparison.index,
         comparison["our_close"],
         color=price_adj,
-        linewidth=3,
+        linewidth=2,
         alpha=0.75,
         label="Adjusted prices",
         zorder=2,
@@ -300,7 +355,7 @@ def _plot_comparison(
         comparison.index,
         comparison["yf_close"],
         color=price_yf,
-        linewidth=3,
+        linewidth=2,
         alpha=0.75,
         label="Yahoo Finance",
         zorder=1,
@@ -316,19 +371,25 @@ def _plot_comparison(
         comparison.index,
         diff_pct,
         color=diff_color,
-        linewidth=1.2,
-        alpha=0.7,
+        linewidth=1,
+        alpha=0.6,
         label="Relative diff",
     )
-    ax2.set_ylim(-diff_ylim, diff_ylim)
+    # Scale the diff axis to 2x the p99 threshold so the tail spikes that legitimately exceed
+    # the gate's p99 limit (only ~1% of points need to stay under it) are visible, not clipped.
+    ax2.set_ylim(-2 * diff_threshold, 2 * diff_threshold)
     ax2.set_ylabel("Relative price difference", color=diff_color)
     ax2.tick_params(axis="y", colors=diff_color)
     ax2.yaxis.set_major_formatter(mtick.FormatStrFormatter("%.2f%%"))
     ax2.grid(False)
 
-    handles = [adj_line, yf_line, diff_line]
-    ax1.legend(handles, [str(h.get_label()) for h in handles], loc="lower right", framealpha=0.9)
+    event_handles, event_labels = _mark_events(
+        ax1, events, comparison.index[0], comparison.index[-1]
+    )
+    handles = [adj_line, yf_line, diff_line, *event_handles]
+    labels = [str(h.get_label()) for h in (adj_line, yf_line, diff_line)] + event_labels
+    ax1.legend(handles, labels, loc="lower right", framealpha=0.9)
 
-    ax1.set_title(f"{ticker} price comparison", fontsize=14, pad=12)
+    ax1.set_title(f"{ticker} price verification vs yfinance", fontsize=14, pad=12)
     fig.tight_layout()
     plt.show()

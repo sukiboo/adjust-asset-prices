@@ -284,7 +284,7 @@ class OptionsPrices:
         mask = df.index.get_level_values("ticker").isin(list(rewrites))
         deduped, n_twins = self._relabel_and_merge(df, mask, rewrites)
         print(
-            f"🔗  Rename-unified {len(rewrites):,} predecessor {side} contracts to {underlying}"
+            f"🔗 Rename-unified {len(rewrites):,} predecessor {side} contracts to {underlying}"
             + (f", deduped {n_twins:,} twin rows" if n_twins else "")
         )
         return deduped
@@ -350,13 +350,13 @@ class OptionsPrices:
             and abs(best[1] - new_strike) <= OPTIONS_INTERNALS["successor_strike_tol"]
         ):
             print(
-                f"🔗  Suffix-match: {ticker} → {best[0]} "
+                f"🔗 Suffix-match: {ticker} → {best[0]} "
                 f"(${parsed.strike} ÷ {ratio:g} ≈ ${new_strike:.4f} ≈ ${best[1]})"
             )
             return best[0]
         tgt = f"closest ${best[1]:.4f}" if best is not None else "no candidate"
         print(
-            f"⛓️‍💥  No successor for {ticker} ({ratio:g}-for-1 on {split_date}; {tgt}); "
+            f"⛓️‍💥 No successor for {ticker} ({ratio:g}-for-1 on {split_date}; {tgt}); "
             f"standalone scale → ${new_strike:.4f}"
         )
         return direct

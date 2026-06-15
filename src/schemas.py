@@ -98,3 +98,14 @@ class Predecessor(NamedTuple):
     symbol: str
     start: date
     end: date
+
+
+class PriceEvent(NamedTuple):
+    """A corporate action the single-series pipeline adjusted for, surfaced on the verification
+    plot so the user can see the adjustments were applied. `kind` drives the marker style; `label`
+    is the short on-plot annotation (splits/renames) or legend-only text (dividends).
+    """
+
+    date: date
+    label: str
+    kind: Literal["split", "dividend", "rename"]
