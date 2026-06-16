@@ -14,6 +14,9 @@ line up with our 1-min UTC bars (an offset of a couple of hours of FX market sta
 forex, fractions of a minute for crypto). If you need a week of data, other providers serve
 it more easily; the value here is in multi-year histories you can't get cleanly elsewhere.
 
+<img width="49.5%" alt="nvda" src="https://github.com/user-attachments/assets/208dddab-bcc1-4ace-977e-8c97878dfa32" />
+<img width="49.5%" alt="meta" src="https://github.com/user-attachments/assets/7661f995-71ce-47bf-a68e-68b556170b7a" />
+
 ## Setup
 
 ```bash
