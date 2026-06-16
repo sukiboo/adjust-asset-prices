@@ -12,7 +12,7 @@ from matplotlib.lines import Line2D
 from matplotlib.typing import LineStyleType
 
 from ..schemas import AssetType, ChecksConfig, PriceEvent, PriceFileFormat
-from ..utils import build_target_index, save_prices, verify_saved_prices
+from ..utils import build_target_index, save_prices, verify_saved_prices, yf_retry
 
 sns.set_theme(style="darkgrid", palette="muted", font="monospace", rc={"lines.linewidth": 2})
 
@@ -171,8 +171,12 @@ def _yf_daily_close(
     404 on the hyphenated form). Returns None when yfinance has no data for the ticker.
     """
     yf_ticker = f"{ticker.replace('-', '')}=X" if asset_type == AssetType.FOREX else ticker
-    yf_df = yf.Ticker(yf_ticker).history(
-        start=start, end=end + pd.Timedelta(days=1), auto_adjust=dividends_adjusted
+    yf_df = yf_retry(
+        lambda: yf.Ticker(yf_ticker).history(
+            start=start, end=end + pd.Timedelta(days=1), auto_adjust=dividends_adjusted
+        ),
+        f"{yf_ticker} daily close",
+        retry_empty=lambda df: df.empty,
     )
     if yf_df.empty:
         return None

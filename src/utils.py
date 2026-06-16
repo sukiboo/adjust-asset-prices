@@ -1,18 +1,25 @@
 import os
 import re
 import sys
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from pathlib import Path
-from typing import Literal, Tuple, cast
+from typing import Literal, Tuple, TypeVar, cast
 
 import numpy as np
 import pandas as pd
 import pandas_market_calendars as mcal
 import yfinance as yf
 
-from .constants import DATA_SOURCE_URL, OPTIONS_INTERNALS, READ_MAX_WORKERS
+from .constants import (
+    DATA_SOURCE_URL,
+    OPTIONS_INTERNALS,
+    READ_MAX_WORKERS,
+    YF_MAX_RETRIES,
+    YF_RETRY_BACKOFF,
+)
 from .schemas import (
     ASSET_TYPE_CONFIG,
     ASSET_TYPES,
@@ -21,6 +28,8 @@ from .schemas import (
     OSIContract,
     PriceFileFormat,
 )
+
+T = TypeVar("T")
 
 
 def check_data_dir(data_dir: str) -> Tuple[Path, list[str]]:
@@ -343,13 +352,35 @@ def load_ticker_data(
     return df, asset_type
 
 
+def yf_retry(
+    fetch: Callable[[], T], label: str, retry_empty: Callable[[T], bool] = lambda _: False
+) -> T:
+    """Call `fetch`, retrying transient yfinance failures (an exception, or — when `retry_empty`
+    says so — an empty result) with linear backoff. Returns the final result even if still empty,
+    so a genuinely empty series is a valid answer."""
+    for attempt in range(1, YF_MAX_RETRIES + 1):
+        last = attempt == YF_MAX_RETRIES
+        try:
+            result = fetch()
+            if last or not retry_empty(result):
+                return result
+            reason = "empty result"
+        except Exception as e:
+            if last:
+                raise
+            reason = type(e).__name__
+        print(f"🔁 {label}: {reason} -- retrying ({attempt}/{YF_MAX_RETRIES - 1})")
+        time.sleep(YF_RETRY_BACKOFF * attempt)
+    raise RuntimeError("unreachable")  # loop always returns or raises on the final attempt
+
+
 def fetch_splits(ticker: str, start: pd.Timestamp) -> pd.Series:
     """Fetch yfinance splits for `ticker` with ex-date >= `start`.
     No upper bound: events with ex-date *after* the data window still apply (the
     `index < ex_date` mask in adjust_for_splits covers all rows), matching yfinance's
     convention that historical prices reflect all known future events.
     """
-    splits = yf.Ticker(ticker).splits
+    splits = yf_retry(lambda: yf.Ticker(ticker).splits, f"{ticker} splits")
     if splits.empty:
         return splits
     idx = pd.to_datetime(splits.index)
@@ -361,7 +392,7 @@ def fetch_dividends(ticker: str, start: pd.Timestamp) -> pd.Series:
     """Fetch yfinance cash dividends for `ticker` with ex-date >= `start`.
     See `fetch_splits` for why there's no upper bound.
     """
-    divs = yf.Ticker(ticker).dividends
+    divs = yf_retry(lambda: yf.Ticker(ticker).dividends, f"{ticker} dividends")
     if divs.empty:
         return divs
     idx = pd.to_datetime(divs.index)
@@ -375,7 +406,11 @@ def fetch_yf_closes(ticker: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.S
     so adjusted prices match yfinance's Adj Close exactly — yfinance computes the factor
     against its official 16:00 ET close, not the last bar before midnight ET.
     """
-    h = yf.Ticker(ticker).history(start=start, end=end, auto_adjust=False)
+    h = yf_retry(
+        lambda: yf.Ticker(ticker).history(start=start, end=end, auto_adjust=False),
+        f"{ticker} closes",
+        retry_empty=lambda df: df.empty,
+    )
     if h.empty:
         return pd.Series(dtype=float)
     closes = h["Close"].copy()

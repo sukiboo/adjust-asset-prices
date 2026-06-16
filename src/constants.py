@@ -66,3 +66,8 @@ OPTIONS_INTERNALS = {
     "min_split_factor": 2,  # only x:1 and 1:x with integer x >= 2 splits are handled
     "successor_strike_tol": 0.01,  # 1¢ max strike gap to match a non-clean contract's successor
 }
+
+# Retry policy for yfinance fetches (transient Yahoo failures: an exception, or — for `.history()`
+# — a logged error plus empty result). Linear backoff: sleep YF_RETRY_BACKOFF * attempt seconds.
+YF_MAX_RETRIES = 4
+YF_RETRY_BACKOFF = 2.0
