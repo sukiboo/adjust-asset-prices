@@ -2,7 +2,7 @@ import os
 import re
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from pathlib import Path
@@ -11,10 +11,13 @@ from typing import Literal, Tuple, TypeVar, cast
 import numpy as np
 import pandas as pd
 import pandas_market_calendars as mcal
+import pyarrow as pa
+import pyarrow.parquet as pq
 import yfinance as yf
 
 from .constants import (
     DATA_SOURCE_URL,
+    MIN_PLAUSIBLE_DATE,
     OPTIONS_INTERNALS,
     READ_MAX_WORKERS,
     YF_MAX_RETRIES,
@@ -237,6 +240,20 @@ def read_gz(path: Path, cols: list[str] | None = None) -> pd.DataFrame:
         )
     except Exception:
         return pd.read_csv(path, compression="gzip", usecols=cols)
+
+
+def drop_implausible_timestamps(
+    df: pd.DataFrame, label: str, ts_col: str = "timestamp_utc"
+) -> pd.DataFrame:
+    """Drop rows before `MIN_PLAUSIBLE_DATE` — guards against upstream ~1970 unit corruption that
+    backfill would fan out into phantom rows. `label` names the series for the log."""
+    floor = pd.Timestamp(MIN_PLAUSIBLE_DATE, tz="UTC")
+    bad = df[ts_col] < floor
+    n_bad = int(bad.sum())
+    if n_bad:
+        print(f"🚮 Dropped {n_bad:,} {label} bars with corrupt (<{MIN_PLAUSIBLE_DATE}) timestamps")
+        df = df[~bad]
+    return df
 
 
 def _read_files_concat(
@@ -619,6 +636,126 @@ def verify_saved_options(
             continue
         print(f"💿 Successfully loaded {underlying} {side} through {format}")
     return ok
+
+
+def stream_save_options(
+    get_batches: Callable[[str], Iterator[pd.DataFrame]],
+    underlying: str,
+    save_dir: str,
+    format: PriceFileFormat,
+) -> bool:
+    """Stream each side's backfilled batches (`get_batches(side)`) to disk and verify, never holding
+    the full frame (it can exceed RAM). Each side streams to a temp file (`close` only), then the
+    shared `<start>_<end>` suffix from the streamed data renames it into place. True iff all verified.
+    """
+    out_dir = os.path.join(save_dir, "options")
+    os.makedirs(out_dir, exist_ok=True)
+
+    sides: dict[str, dict] = {}
+    overall_min: pd.Timestamp | None = None
+    overall_max: pd.Timestamp | None = None
+    for side in ("calls", "puts"):
+        info = _stream_write_side(get_batches(side), out_dir, underlying, side, format)
+        if info is None:
+            print(f"⚠️ {underlying} {side}: no contracts to save")
+            continue
+        sides[side] = info
+        overall_min = info["min_ts"] if overall_min is None else min(overall_min, info["min_ts"])
+        overall_max = info["max_ts"] if overall_max is None else max(overall_max, info["max_ts"])
+
+    if not sides:
+        print(f"⚠️ {underlying}: no option contracts to save")
+        return False
+
+    suffix = _date_range_suffix(cast(pd.Timestamp, overall_min), cast(pd.Timestamp, overall_max))
+    ok = True
+    for side, info in sides.items():
+        final_path = os.path.join(out_dir, _options_file_name(underlying, suffix, side, format))
+        os.replace(info["tmp_path"], final_path)
+        print(f"📀 Saved {underlying} {side} to {final_path} ({info['rows']:,} rows)")
+        if _verify_streamed_side(final_path, info, format):
+            print(f"💿 Successfully loaded {underlying} {side} through {format}")
+        else:
+            print(f"❗ Saved options file for {underlying} {side} does not match in-memory data!")
+            ok = False
+    return ok
+
+
+def _stream_write_side(
+    batches: Iterator[pd.DataFrame], out_dir: str, underlying: str, side: str, format: str
+) -> dict | None:
+    """Write one side's batches to a temp file (`close` only), tracking row count + timestamp span
+    and retaining the first/last batch for verification. None (and removes the temp) if empty."""
+    tmp_path = os.path.join(out_dir, f".{underlying}_{side}.{format}.tmp")
+    rows = 0
+    min_ts: pd.Timestamp | None = None
+    max_ts: pd.Timestamp | None = None
+    first_batch: pd.DataFrame | None = None
+    last_batch: pd.DataFrame | None = None
+    pq_writer: pq.ParquetWriter | None = None
+    csv_mode, csv_header = "w", True
+    for batch in batches:
+        batch = batch[["close"]]
+        if batch.empty:
+            continue
+        rows += len(batch)
+        if first_batch is None:
+            first_batch = batch
+        last_batch = batch
+        ts = batch.index.get_level_values("timestamp_utc")
+        min_ts = ts.min() if min_ts is None else min(min_ts, ts.min())
+        max_ts = ts.max() if max_ts is None else max(max_ts, ts.max())
+        if format == "parquet":
+            table = pa.Table.from_pandas(batch)
+            if pq_writer is None:
+                pq_writer = pq.ParquetWriter(tmp_path, table.schema)
+            pq_writer.write_table(table, row_group_size=len(batch))
+        elif format == "csv":
+            batch.to_csv(tmp_path, mode=csv_mode, header=csv_header)
+            csv_mode, csv_header = "a", False
+        else:
+            raise ValueError(f"Invalid format: {format}, must be `csv` or `parquet`")
+    if pq_writer is not None:
+        pq_writer.close()
+    if rows == 0:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        return None
+    return {
+        "tmp_path": tmp_path,
+        "rows": rows,
+        "min_ts": min_ts,
+        "max_ts": max_ts,
+        "first_batch": first_batch,
+        "last_batch": last_batch,
+    }
+
+
+def _verify_streamed_side(path: str, info: dict, format: str) -> bool:
+    """Bounded round-trip check: parquet compares the footer row count + first/last row group (=
+    retained first/last batch); csv compares the first batch only (a full reload would defeat it).
+    """
+    if format == "parquet":
+        pf = pq.ParquetFile(path)
+        if pf.metadata.num_rows != info["rows"]:
+            return False
+        checks = [
+            (pf.read_row_group(0).to_pandas(), info["first_batch"]),
+            (pf.read_row_group(pf.num_row_groups - 1).to_pandas(), info["last_batch"]),
+        ]
+    else:  # csv
+        head = pd.read_csv(path, index_col=[0, 1], parse_dates=[0], nrows=len(info["first_batch"]))
+        ts = cast(pd.DatetimeIndex, head.index.get_level_values("timestamp_utc"))
+        if ts.tz is None:
+            head.index = head.index.set_levels(  # type: ignore[attr-defined]
+                ts.tz_localize("UTC"), level="timestamp_utc"
+            )
+        checks = [(head, info["first_batch"])]
+    return all(
+        np.allclose(loaded.values, original.values, equal_nan=True)
+        and loaded.index.equals(original.index)
+        for loaded, original in checks
+    )
 
 
 def _prompt_save_on_fail() -> bool:

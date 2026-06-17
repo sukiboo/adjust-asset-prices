@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from datetime import date
 from typing import Literal, cast
 
@@ -11,6 +11,7 @@ from ..schemas import AssetType, OSIContract, Predecessor
 from ..utils import (
     build_target_index,
     describe_adjusted_options,
+    drop_implausible_timestamps,
     fetch_splits,
     format_osi_ticker,
     load_options_data,
@@ -46,12 +47,26 @@ class OptionsPrices:
         OSI contracts are loaded and rewritten to the live root, so series spanning a rename load
         continuous.
         """
+        calls, puts = self.load_and_adjust(underlying, date_start, date_end, predecessors)
+        calls, puts = self.backfill_options(calls, puts)
+        describe_adjusted_options(calls, puts, underlying)
+        return calls, puts
+
+    def load_and_adjust(
+        self,
+        underlying: str,
+        date_start: str | None = None,
+        date_end: str | None = None,
+        predecessors: Sequence[Predecessor] = (),
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Load + rename-unify + split-unify (no backfill) → raw adjusted `(calls, puts)`, every bar
+        a real print. `Prices.process` gates these and streams the backfill to disk (never holding
+        the full RAM-exceeding frame); `get_options` is the eager variant that also backfills.
+        """
         calls, puts = self.load_options(underlying, date_start, date_end, predecessors)
         print("⚙️  Adjusting options contracts...")
         calls, puts = self.unify_rename_symbols(calls, puts, underlying, predecessors)
         calls, puts = self.adjust_options_splits(calls, puts, underlying)
-        calls, puts = self.backfill_options(calls, puts)
-        describe_adjusted_options(calls, puts, underlying)
         return calls, puts
 
     def load_options(
@@ -86,6 +101,9 @@ class OptionsPrices:
         # boolean call/put split below materializes a subset. `large_string` lifts the ceiling;
         # no-op cost for the small loads that already worked.
         df["ticker"] = df["ticker"].astype(pd.ArrowDtype(pa.large_string()))
+
+        # After the large_string cast so the boolean mask's `take` doesn't overflow at QQQ scale.
+        df = drop_implausible_timestamps(df, "option")
 
         contract_type = {t: parse_osi_ticker(t).option_type for t in df["ticker"].unique()}
         is_call = df["ticker"].map(contract_type) == "C"
@@ -123,9 +141,27 @@ class OptionsPrices:
     def _backfill_contracts(self, df: pd.DataFrame, side: OptionSide) -> pd.DataFrame:
         if df.empty:
             return df
+        # sort_index restores the canonical (timestamp, ticker) order; the streaming caller keeps
+        # the (ticker, timestamp) emission order (a global timestamp sort needs the full frame).
+        result = pd.concat(self._backfill_batches(df)).sort_index()
+        n_contracts = result.index.get_level_values("ticker").nunique()
+        print(f"🔧 Backfilled to {len(result):,} rows across {n_contracts:,} {side} contracts")
+        return result
 
-        # Build the full RTH target index once and slice it per contract via searchsorted,
-        # rather than a per-contract mcal.schedule call (the old hotspot: ~20min → seconds).
+    def backfill_option_batches(
+        self, df: pd.DataFrame, batch_rows: int = int(OPTIONS_INTERNALS["save_batch_rows"])
+    ) -> Iterator[pd.DataFrame]:
+        """Yield the backfilled `(close, is_real)` frame in row-bounded batches (~`batch_rows` each)
+        so a large universe streams to disk without holding the full frame; row-count batching (not
+        per-contract) bounds long-dated LEAPS."""
+        yield from self._backfill_batches(df, batch_rows)
+
+    def _backfill_batches(
+        self, df: pd.DataFrame, batch_rows: int | None = None
+    ) -> Iterator[pd.DataFrame]:
+        # Build the RTH index once, slice per contract via searchsorted. Contracts come sorted-ticker
+        # and each timestamp-sorted, so a batch is (ticker, timestamp)-ordered without a sort.
+        # batch_rows set → flush at that size (streaming); None → one batch (eager caller re-sorts).
         ts_level = cast(pd.DatetimeIndex, df.index.get_level_values("timestamp_utc"))
         window_start = cast(pd.Timestamp, ts_level.min()).tz_convert("America/New_York")
         window_end = cast(pd.Timestamp, ts_level.max()).tz_convert("America/New_York")
@@ -133,31 +169,49 @@ class OptionsPrices:
         full_index = build_target_index(window_start, window_end, AssetType.OPTIONS)
         full_et = cast(pd.DatetimeIndex, full_index.tz_convert("America/New_York"))
 
-        backfilled = []
-        for ticker, group in df.groupby(level="ticker", sort=False):
-            series = group.droplevel("ticker")["close"]
-            expiry = parse_osi_ticker(cast(str, ticker)).expiry
-            first_date = cast(pd.Timestamp, series.index[0]).tz_convert("America/New_York").date()
-            end_date = min(expiry, window_end_date)
-            if end_date < first_date:
-                continue  # contract first prints after expiry — upstream bug, drop
-            start_ts = pd.Timestamp(first_date, tz="America/New_York")
-            end_ts = pd.Timestamp(end_date, tz="America/New_York") + pd.Timedelta(days=1)
-            start_idx = full_et.searchsorted(start_ts, side="left")
-            end_idx = full_et.searchsorted(end_ts, side="left")
-            target_index = full_index[start_idx:end_idx]
-            reindexed = series.reindex(target_index)
-            is_real = reindexed.notna().to_numpy()
-            filled = reindexed.ffill().bfill().to_numpy()
-            mi = pd.MultiIndex.from_product(
-                [target_index, [ticker]], names=["timestamp_utc", "ticker"]
+        batch: list[pd.DataFrame] = []
+        batch_len = 0
+        for ticker, group in df.groupby(level="ticker", sort=True):
+            frame = self._backfill_one(
+                cast(str, ticker), group, full_index, full_et, window_end_date
             )
-            backfilled.append(pd.DataFrame({"close": filled, "is_real": is_real}, index=mi))
+            if frame is None:
+                continue
+            batch.append(frame)
+            batch_len += len(frame)
+            if batch_rows is not None and batch_len >= batch_rows:
+                yield pd.concat(batch)
+                batch, batch_len = [], 0
+        if batch:
+            yield pd.concat(batch)
 
-        result = pd.concat(backfilled).sort_index()
-        n_contracts = result.index.get_level_values("ticker").nunique()
-        print(f"🔧 Backfilled to {len(result):,} rows across {n_contracts:,} {side} contracts")
-        return result
+    def _backfill_one(
+        self,
+        ticker: str,
+        group: pd.DataFrame,
+        full_index: pd.DatetimeIndex,
+        full_et: pd.DatetimeIndex,
+        window_end_date: date,
+    ) -> pd.DataFrame | None:
+        """Reindex one contract onto `[first_bar, min(expiry, window_end)]` and flat-fill
+        (ffill/bfill, no interpolation — options are illiquid). None if it first prints after expiry.
+        """
+        series = group.droplevel("ticker")["close"]
+        expiry = parse_osi_ticker(ticker).expiry
+        first_date = cast(pd.Timestamp, series.index[0]).tz_convert("America/New_York").date()
+        end_date = min(expiry, window_end_date)
+        if end_date < first_date:
+            return None
+        start_ts = pd.Timestamp(first_date, tz="America/New_York")
+        end_ts = pd.Timestamp(end_date, tz="America/New_York") + pd.Timedelta(days=1)
+        start_idx = full_et.searchsorted(start_ts, side="left")
+        end_idx = full_et.searchsorted(end_ts, side="left")
+        target_index = full_index[start_idx:end_idx]
+        reindexed = series.reindex(target_index)
+        is_real = reindexed.notna().to_numpy()
+        filled = reindexed.ffill().bfill().to_numpy()
+        mi = pd.MultiIndex.from_product([target_index, [ticker]], names=["timestamp_utc", "ticker"])
+        return pd.DataFrame({"close": filled, "is_real": is_real}, index=mi)
 
     def adjust_options_splits(
         self, calls: pd.DataFrame, puts: pd.DataFrame, underlying: str

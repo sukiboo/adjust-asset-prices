@@ -59,7 +59,7 @@ class Prices:
             confirm_on_fail=confirm_on_fail,
         )
         if options and saved:
-            calls, puts = self.options.get_options(
+            calls, puts = self.options.load_and_adjust(
                 ticker, date_start, date_end, predecessors=self.asset.predecessors
             )
             saved = save_options_if_valid(
@@ -70,5 +70,6 @@ class Prices:
                 save_dir=save_dir,
                 format=format,
                 config=OPTIONS_CHECKS_CONFIG,
+                backfill_side=self.options.backfill_option_batches,
             )
         return saved

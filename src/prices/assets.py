@@ -10,6 +10,7 @@ from ..utils import (
     build_target_index,
     check_data_dir,
     describe_adjusted_prices,
+    drop_implausible_timestamps,
     fetch_dividends,
     fetch_splits,
     fetch_yf_closes,
@@ -96,6 +97,8 @@ class AssetPrices:
             )
 
         df["timestamp_utc"] = pd.to_datetime(df["window_start"], unit="ns", utc=True)
+        # Drop corrupt near-epoch timestamps before they set df.index[0] (backfill bounds + fetches).
+        df = drop_implausible_timestamps(df, ticker)
         df = df.sort_values("timestamp_utc").set_index("timestamp_utc")
         df = pd.DataFrame(df[["close"]]).rename(columns={"close": ticker})
 

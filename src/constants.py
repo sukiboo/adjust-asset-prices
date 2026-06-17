@@ -12,6 +12,10 @@ DEFAULT_SHOW_PLOT = False
 # parallelism here (~3.5x on the read-bound load); empirically saturates around 8 workers.
 READ_MAX_WORKERS = 8
 
+# Drop bars before this on load (all assets) — corruption guard: some raw files store window_start
+# ~1e6 too small (a ~1970 unit bug) which backfill would otherwise fan out as phantom rows.
+MIN_PLAUSIBLE_DATE = "2000-01-01"
+
 # Where users can get the raw daily price files when they have none locally (pre-built daily
 # files for all asset types through 2026). Surfaced by `check_data_dir` in the no-data error.
 DATA_SOURCE_URL = "https://www.dropbox.com/scl/fo/xd5a5s5cwa0imf6gvplzv/AL1ffzRw3_AEfeEwRoKLQms?rlkey=ah6c8ps5zvco29npoeoro831k&dl=0"
@@ -65,6 +69,7 @@ OPTIONS_INTERNALS = {
     "integer_tol": 1e-6,  # float slack for "is this a whole number" (clean strike / split ratio)
     "min_split_factor": 2,  # only x:1 and 1:x with integer x >= 2 splits are handled
     "successor_strike_tol": 0.01,  # 1¢ max strike gap to match a non-clean contract's successor
+    "save_batch_rows": 10_000_000,  # max rows/batch when streaming backfill to disk to avoid OOM
 }
 
 # Retry policy for yfinance fetches (transient Yahoo failures: an exception, or — for `.history()`

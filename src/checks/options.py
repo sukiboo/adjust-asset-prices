@@ -1,10 +1,11 @@
+from collections.abc import Callable, Iterator
 from typing import cast
 
 import numpy as np
 import pandas as pd
 
 from ..schemas import OptionsChecksConfig, PriceFileFormat
-from ..utils import parse_osi_ticker, save_options, verify_saved_options
+from ..utils import parse_osi_ticker, stream_save_options
 
 
 def check_options(
@@ -63,7 +64,9 @@ def _run_side_checks(
     strikes = np.array([parsed_by_ticker[t].strike for t in ticker_level])
     underlying_at_t = cast(pd.Series, underlying_series.reindex(ts_level)).to_numpy()
     close = df["close"].to_numpy()
-    real = df["is_real"].to_numpy()
+    # Raw adjusted frames (streaming save path) have no `is_real` — every bar is real, so absence
+    # means all-real (equivalent to gating the backfilled output; synthetic bars are ffill copies).
+    real = df["is_real"].to_numpy() if "is_real" in df.columns else np.ones(len(df), dtype=bool)
 
     # The two no-arb bound checks evaluate REAL (traded) bars that are not deep-ITM:
     #  - real only: synthetic backfilled bars hold the last trade flat and don't track the
@@ -215,14 +218,18 @@ def save_options_if_valid(
     save_dir: str,
     format: PriceFileFormat,
     config: OptionsChecksConfig,
+    backfill_side: Callable[[pd.DataFrame], Iterator[pd.DataFrame]],
 ) -> bool:
-    """Run the structural gate; on pass, save both sides and verify the round-trip. The in-memory
-    `is_real` gate marker is dropped before persisting so the on-disk schema stays `close`-only.
+    """Gate the RAW adjusted contracts, then stream the backfill to disk and verify. Gating raw
+    equals gating the backfilled output (synthetic bars are ffill copies). `backfill_side(df)` yields
+    the backfill in row-bounded batches, so the full RAM-exceeding frame is never materialized.
     """
     if not check_options(calls, puts, underlying, underlying_df, config):
         print(f"\n❌ {underlying} options checks failed, not saving!")
         return False
     print(f"\n🎉 {underlying} options checks passed, saving the options data...")
-    calls, puts = calls[["close"]], puts[["close"]]
-    save_options(calls, puts, underlying, save_dir=save_dir, format=format)
-    return verify_saved_options(calls, puts, underlying, save_dir=save_dir, format=format)
+
+    def get_batches(side: str) -> Iterator[pd.DataFrame]:
+        return backfill_side(calls if side == "calls" else puts)
+
+    return stream_save_options(get_batches, underlying, save_dir=save_dir, format=format)
