@@ -4,6 +4,7 @@ from typing import Literal, cast
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 
 from ..constants import OPTIONS_INTERNALS
 from ..schemas import AssetType, OSIContract, Predecessor
@@ -80,6 +81,11 @@ class OptionsPrices:
         df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
         df["timestamp_utc"] = pd.to_datetime(df["window_start"], unit="ns", utc=True)
         df = df[["timestamp_utc", "ticker", "close"]]
+        # Use 64-bit string offsets: at large-underlying scale (e.g. full-range QQQ) the combined
+        # ticker column exceeds pyarrow `string`'s int32 offset cap (~2 GB) and overflows when the
+        # boolean call/put split below materializes a subset. `large_string` lifts the ceiling;
+        # no-op cost for the small loads that already worked.
+        df["ticker"] = df["ticker"].astype(pd.ArrowDtype(pa.large_string()))
 
         contract_type = {t: parse_osi_ticker(t).option_type for t in df["ticker"].unique()}
         is_call = df["ticker"].map(contract_type) == "C"

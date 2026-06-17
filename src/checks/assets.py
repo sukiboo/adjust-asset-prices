@@ -1,3 +1,4 @@
+import gc
 from collections.abc import Callable, Sequence
 from typing import cast
 
@@ -257,6 +258,7 @@ def compare_to_yf(
         )
         if show_plot:
             _plot_comparison(comparison, diff_pct, ticker, abs_rel_diff_pct_p99, events)
+            gc.collect()
         return passed
 
     except Exception as e:
@@ -397,3 +399,4 @@ def _plot_comparison(
     ax1.set_title(f"{ticker} price verification vs yfinance", fontsize=14, pad=12)
     fig.tight_layout()
     plt.show()
+    plt.close(fig)  # drop pyplot's reference; caller forces the Tk-cycle collection (see below)
