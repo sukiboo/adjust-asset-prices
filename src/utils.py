@@ -251,7 +251,7 @@ def drop_implausible_timestamps(
     bad = df[ts_col] < floor
     n_bad = int(bad.sum())
     if n_bad:
-        print(f"🚮 Dropped {n_bad:,} {label} bars with corrupt (<{MIN_PLAUSIBLE_DATE}) timestamps")
+        print(f"🧹 Dropped {n_bad:,} {label} bars with corrupt (<{MIN_PLAUSIBLE_DATE}) timestamps")
         df = df[~bad]
     return df
 
@@ -460,31 +460,45 @@ def describe_adjusted_options(calls: pd.DataFrame, puts: pd.DataFrame, underlyin
         )
 
 
+def _trading_day(ts: pd.Timestamp, asset_type: AssetType) -> pd.Timestamp:
+    """Bar timestamp → its trading day: NYSE assets convert to ET first, so a stock session's last
+    bar (19:59 ET = 00:59 UTC next day) maps to its trading date, not the rolled-over UTC date."""
+    if asset_type in (AssetType.STOCKS, AssetType.OPTIONS):
+        return cast(pd.Timestamp, ts.tz_convert("America/New_York"))
+    return ts
+
+
 def _date_range_suffix(start: pd.Timestamp, end: pd.Timestamp) -> str:
     """`YYYYMMDD_YYYYMMDD` spanning [start, end] as UTC dates, for self-describing filenames."""
     return f"{parse_date(start):%Y%m%d}_{parse_date(end):%Y%m%d}"
 
 
-def _price_file_name(df: pd.DataFrame, format: PriceFileFormat, dividends: bool = False) -> str:
-    """`<TICKER>[_dividends]_<start>_<end>.<format>`; the date range is taken from the frame's own
-    index, and the `dividends` tag flags a dividend-adjusted (total-return) series so it isn't
-    confused with the default split-only one."""
+def _price_file_name(
+    df: pd.DataFrame, format: PriceFileFormat, asset_type: AssetType, dividends: bool = False
+) -> str:
+    """`<TICKER>[_dividends]_<start>_<end>.<format>`; the date range is the frame's own index as
+    trading days (ET for NYSE assets), and the `dividends` tag flags a dividend-adjusted
+    (total-return) series so it isn't confused with the default split-only one."""
     idx = cast(pd.DatetimeIndex, df.index)
-    suffix = _date_range_suffix(cast(pd.Timestamp, idx.min()), cast(pd.Timestamp, idx.max()))
+    start = _trading_day(cast(pd.Timestamp, idx.min()), asset_type)
+    end = _trading_day(cast(pd.Timestamp, idx.max()), asset_type)
     tag = "dividends_" if dividends else ""
-    return f"{df.columns[0]}_{tag}{suffix}.{format}"
+    return f"{df.columns[0]}_{tag}{_date_range_suffix(start, end)}.{format}"
 
 
 def save_prices(
     df: pd.DataFrame,
     save_dir: str = "./data/prices",
     format: PriceFileFormat = "parquet",
+    asset_type: AssetType = AssetType.STOCKS,
     dividends: bool = False,
 ) -> None:
-    """Save the prices to `<save_dir>/<TICKER>[_dividends]_<start>_<end>.<format>` (date range
-    from the frame's own index; `dividends` tags a dividend-adjusted series)."""
-    os.makedirs(save_dir, exist_ok=True)
-    save_path = os.path.join(save_dir, _price_file_name(df, format, dividends))
+    """Save the prices to `<save_dir>/<asset_type>/<TICKER>[_dividends]_<start>_<end>.<format>`
+    (per-asset-type folder mirroring the raw inputs; date range from the frame's own index as
+    trading days; `dividends` tags a dividend-adjusted series)."""
+    out_dir = os.path.join(save_dir, asset_type.value)
+    os.makedirs(out_dir, exist_ok=True)
+    save_path = os.path.join(out_dir, _price_file_name(df, format, asset_type, dividends))
     if format == "csv":
         df.to_csv(save_path, index=True)
     elif format == "parquet":
@@ -524,11 +538,18 @@ def load_prices(file_name: str, load_dir: str = "./data/prices") -> pd.DataFrame
 
 
 def verify_saved_prices(
-    df: pd.DataFrame, save_dir: str, format: PriceFileFormat, dividends: bool = False
+    df: pd.DataFrame,
+    save_dir: str,
+    format: PriceFileFormat,
+    asset_type: AssetType = AssetType.STOCKS,
+    dividends: bool = False,
 ) -> bool:
     """Reload the saved file and confirm it matches the in-memory data."""
     ticker = df.columns[0]
-    loaded = load_prices(_price_file_name(df, format, dividends), load_dir=save_dir)
+    loaded = load_prices(
+        _price_file_name(df, format, asset_type, dividends),
+        load_dir=os.path.join(save_dir, asset_type.value),
+    )
     values_match = np.allclose(df.values, loaded.values, equal_nan=True)
     index_match = df.index.equals(loaded.index)
     if not (values_match and index_match):

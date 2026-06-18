@@ -77,8 +77,12 @@ def save_if_valid(
             return False
     else:
         print("\n🎉 All checks passed, saving the price data...")
-    save_prices(df, save_dir=save_dir, format=format, dividends=dividends_adjusted)
-    verify_saved_prices(df, save_dir=save_dir, format=format, dividends=dividends_adjusted)
+    save_prices(
+        df, save_dir=save_dir, format=format, asset_type=asset_type, dividends=dividends_adjusted
+    )
+    verify_saved_prices(
+        df, save_dir=save_dir, format=format, asset_type=asset_type, dividends=dividends_adjusted
+    )
     return True
 
 

@@ -42,8 +42,9 @@ python run.py <TICKER> [OPTIONS]
 
 End-to-end pipeline for one ticker: load raw bars → backfill missing minutes → adjust for
 splits (and optionally cash dividends; stocks only, using yfinance metadata) → run sanity
-checks → save to `./data/prices/<TICKER>[_dividends]_<start>_<end>.<format>` (the date range is
-taken from the saved series' own index; the `_dividends` tag marks a dividend-adjusted series)
+checks → save to `./data/prices/<asset_type>/<TICKER>[_dividends]_<start>_<end>.<format>` (a
+per-asset-type folder mirroring the raw inputs; the date range is taken from the saved series'
+own index as trading days; the `_dividends` tag marks a dividend-adjusted series)
 → reload and verify the round-trip.
 
 Tickers are unprefixed and the asset type is auto-detected from your local data: `BTC-USD`
@@ -95,15 +96,16 @@ python run.py NVDA --options --date-start 2024-06-01 --date-end 2024-06-30
 
 ## Output
 
-Files are written to `--save-dir` (default `./data/prices/`), then reloaded and compared against
-memory to verify the round-trip. The `<start>_<end>` range (`YYYYMMDD`) is taken from the saved
-frame's own index.
+Files are written under `--save-dir` (default `./data/prices/`) in a per-asset-type subfolder
+(`stocks/`, `crypto/`, `forex/`, `options/`) mirroring the raw inputs, then reloaded and compared
+against memory to verify the round-trip. The `<start>_<end>` range (`YYYYMMDD`) is taken from the
+saved frame's own index as trading days (ET for NYSE assets).
 
-- **Stocks / crypto / forex** — one file `<TICKER>[_dividends]_<start>_<end>.<format>`
-  (e.g. `BTC-USD_20240101_20241231.parquet`, or `SPY_dividends_20200101_20231231.parquet` for a
-  `--dividends` run): a 1-minute `timestamp_utc` index (UTC) and a single price column named after
-  the ticker. The `_dividends` tag distinguishes a total-return series from the default split-only one.
-- **Options** — two files under an `options/` subfolder,
+- **Stocks / crypto / forex** — one file `<asset_type>/<TICKER>[_dividends]_<start>_<end>.<format>`
+  (e.g. `crypto/BTC-USD_20240101_20241231.parquet`, or `stocks/SPY_dividends_20200101_20231231.parquet`
+  for a `--dividends` run): a 1-minute `timestamp_utc` index (UTC) and a single price column named
+  after the ticker. The `_dividends` tag distinguishes a total-return series from the default split-only one.
+- **Options** — two files under the `options/` subfolder,
   `options/<UNDERLYING>_<start>_<end>_{calls,puts}.<format>`: a `(timestamp_utc, ticker)`
   multi-index and a single `close` column (one row per contract per minute).
 
@@ -114,7 +116,7 @@ with pandas:
 import pandas as pd
 
 # single-series
-prices = pd.read_parquet("data/prices/BTC-USD_20240101_20241231.parquet")
+prices = pd.read_parquet("data/prices/crypto/BTC-USD_20240101_20241231.parquet")
 
 # options (one side)
 calls = pd.read_parquet("data/prices/options/NVDA_20240601_20240630_calls.parquet")

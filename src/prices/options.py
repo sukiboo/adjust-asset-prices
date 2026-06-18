@@ -92,7 +92,7 @@ class OptionsPrices:
                 )
                 print(f"⛏️  Loaded predecessor {pred.symbol} options ({pred.start} -- {pred.end})")
             except ValueError:
-                print(f"⚠️  No predecessor {pred.symbol} options in {pred.start} -- {pred.end}")
+                print(f"🪏  No predecessor {pred.symbol} options in {pred.start} -- {pred.end}")
         df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
         df["timestamp_utc"] = pd.to_datetime(df["window_start"], unit="ns", utc=True)
         df = df[["timestamp_utc", "ticker", "close"]]
