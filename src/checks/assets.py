@@ -240,13 +240,16 @@ def compare_to_yf(
             return False
 
         our_daily = _our_daily_close(df, asset_type)
-        missing_run = _max_missing_run(our_daily.index, yf_daily.index)
-        if missing_run > yf_max_missing_run_sessions:
-            print(
-                f"❌ {ticker}: yfinance is missing {missing_run} consecutive sessions our data "
-                f"covers -- that span is uncorroborated (likely a wrong stitch), not saving."
-            )
-            return False
+        # Stocks only: the check backstops the stock-only rename stitcher. Crypto/forex never
+        # stitch, so an uncorroborated run is just yfinance's shorter history, not a wrong stitch.
+        if asset_type == AssetType.STOCKS:
+            missing_run = _max_missing_run(our_daily.index, yf_daily.index)
+            if missing_run > yf_max_missing_run_sessions:
+                print(
+                    f"❌ {ticker}: yfinance is missing {missing_run} consecutive sessions our data "
+                    f"covers -- that span is uncorroborated (likely a wrong stitch), not saving."
+                )
+                return False
 
         comparison = pd.concat([our_daily, yf_daily], axis=1).dropna()
         comparison.columns = ["our_close", "yf_close"]
