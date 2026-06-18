@@ -15,8 +15,10 @@ from ..utils import (
     drop_implausible_timestamps,
     fetch_splits,
     format_osi_ticker,
+    format_split_label,
     load_options_data,
     parse_osi_ticker,
+    strike_fits_osi,
     underlying_matches,
 )
 from .assets import AssetPrices
@@ -247,6 +249,7 @@ class OptionsPrices:
         """Rewrite every pre-split contract into post-split currency, one split at a time."""
         if df.empty:
             return df
+        total_dropped = 0
         for split_ts, ratio in splits.items():
             split_ts = cast(pd.Timestamp, split_ts)
             if not self._is_handled_split_ratio(ratio):
@@ -255,7 +258,13 @@ class OptionsPrices:
                     "likely a spinoff / distribution, not a stock split (no OCC support)"
                 )
                 continue
-            df = self._apply_split(df, split_ts, ratio, underlying, side)
+            df, n_dropped = self._apply_split(df, split_ts, ratio, underlying, side)
+            total_dropped += n_dropped
+        if total_dropped:
+            print(
+                f"🗑️  Dropped {total_dropped:,} {side} contracts whose back-adjusted strike "
+                "fell outside the OSI $0.001-$99,999.999 field (synthetic strikes that never traded)"
+            )
         return df
 
     def _apply_split(
@@ -265,19 +274,25 @@ class OptionsPrices:
         ratio: float,
         underlying: str,
         side: OptionSide,
-    ) -> pd.DataFrame:
+    ) -> tuple[pd.DataFrame, int]:
         """Rescale pre-split bars by 1/ratio, relabel to successor symbols, merge with the
-        post-split bars (deduping the base/suffixed twins the raw feed emits).
+        post-split bars (deduping the base/suffixed twins the raw feed emits). Pre-split bars of
+        contracts whose back-adjusted strike leaves the OSI field are dropped; returns the
+        rewritten frame and the dropped-contract count.
         """
         ts_level = df.index.get_level_values("timestamp_utc")
         pre_mask = ts_level < split_ts
         if not pre_mask.any():
-            return df
+            return df, 0
 
-        rewrites, counts = self._successor_symbols(df, split_ts, ratio, underlying)
+        rewrites, drops, counts = self._successor_symbols(df, split_ts, ratio, underlying)
+        if drops:
+            drop_mask = pre_mask & df.index.get_level_values("ticker").isin(drops)
+            df = df[~drop_mask]
+            pre_mask = df.index.get_level_values("timestamp_utc") < split_ts
         deduped, n_twins = self._relabel_and_merge(df, pre_mask, rewrites, scale=ratio)
         print(
-            f"🪚  {ratio:g}-for-1 split on {split_ts.date()}: rewrote {len(rewrites):,}"
+            f"🪚  {format_split_label(ratio)} on {split_ts.date()}: rewrote {len(rewrites):,}"
             f" {side} contracts / {int(pre_mask.sum()):,} rows"
             + (f", {counts['matched']:,} matched" if counts["matched"] else "")
             + (
@@ -285,9 +300,10 @@ class OptionsPrices:
                 if counts["standalone"]
                 else ""
             )
+            + (f", {counts['overflow']:,} dropped (strike out of OSI range)" if drops else "")
             + (f", deduped {n_twins:,} twin rows" if n_twins else "")
         )
-        return deduped
+        return deduped, counts["overflow"]
 
     def _relabel_and_merge(
         self, df: pd.DataFrame, mask: np.ndarray, rewrites: dict[str, str], scale: float = 1.0
@@ -373,22 +389,26 @@ class OptionsPrices:
 
     def _successor_symbols(
         self, df: pd.DataFrame, split_ts: pd.Timestamp, ratio: float, underlying: str
-    ) -> tuple[dict[str, str], Counter[str]]:
+    ) -> tuple[dict[str, str], list[str], Counter[str]]:
         """Map every pre-split ticker — any root, incl. already-suffixed AAPL7 — to its
-        post-split successor symbol, plus a Counter of successor categories (matched/standalone)
-        for the per-split summary line.
+        post-split successor symbol, the list of tickers whose back-adjusted strike leaves the OSI
+        field (to drop), and a Counter of categories (matched/standalone/overflow).
         """
         ts_level = df.index.get_level_values("timestamp_utc")
         ticker_level = df.index.get_level_values("ticker")
         candidates = self._successor_candidates(ticker_level[ts_level >= split_ts], underlying)
         split_date = split_ts.date()
         rewrites: dict[str, str] = {}
+        drops: list[str] = []
         counts: Counter[str] = Counter()
         for t in ticker_level[ts_level < split_ts].unique():
             successor, kind = self._successor_for(cast(str, t), ratio, split_date, candidates)
-            rewrites[cast(str, t)] = successor
             counts[kind] += 1
-        return rewrites, counts
+            if successor is None:
+                drops.append(cast(str, t))
+            else:
+                rewrites[cast(str, t)] = successor
+        return rewrites, drops, counts
 
     def _successor_for(
         self,
@@ -396,13 +416,16 @@ class OptionsPrices:
         ratio: float,
         split_date: date,
         candidates: dict[tuple[date, str], list[tuple[str, float, bool]]],
-    ) -> tuple[str, str]:
+    ) -> tuple[str | None, str]:
         """Successor symbol for `ticker` (strike ÷ ratio) + category ("direct"/"matched"/
-        "standalone"). Clean/expired strikes resolve directly; a non-clean spanning contract matches
-        the closest OCC successor within 1¢, suffixed root before base (feed dual-emits both).
+        "standalone"/"overflow"); `(None, "overflow")` drops a contract whose back-adjusted strike
+        leaves the OSI field. Else clean/expired strikes resolve directly; a non-clean spanning
+        contract matches the closest OCC successor within 1¢, suffixed root before base.
         """
         parsed = parse_osi_ticker(ticker)
         new_strike = parsed.strike / ratio
+        if not strike_fits_osi(new_strike):
+            return None, "overflow"
         direct = format_osi_ticker(
             OSIContract(parsed.underlying, parsed.expiry, parsed.option_type, new_strike)
         )

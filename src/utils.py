@@ -216,14 +216,29 @@ def underlying_matches(parsed_underlying: str, target: str) -> bool:
     return False
 
 
+OSI_STRIKE_MAX_MILLI = 99_999_999  # OSI strike field is 8 digits of milli-dollars (max $99,999.999)
+
+
+def strike_fits_osi(strike: float) -> bool:
+    """True iff `strike` fits the OSI 8-digit milli-dollar field (~$0.001 to $99,999.999)."""
+    milli = round(strike * OPTIONS_INTERNALS["strike_scale"])
+    return 1 <= milli <= OSI_STRIKE_MAX_MILLI
+
+
 def format_osi_ticker(contract: OSIContract) -> str:
     """Inverse of `parse_osi_ticker` — reconstruct the Polygon-prefixed OSI symbol.
     Strike is rounded to the nearest 1/1000 dollar (OSI's native precision); callers
     that need to verify a strike divides cleanly under a corporate-action ratio should
-    check that themselves before calling.
+    check that themselves before calling. Raises `ValueError` if the strike falls outside
+    the OSI 8-digit field (`strike_fits_osi`), rather than emit a malformed symbol.
     """
     yy = contract.expiry.year % 100
     strike_milli = round(contract.strike * OPTIONS_INTERNALS["strike_scale"])
+    if not 1 <= strike_milli <= OSI_STRIKE_MAX_MILLI:
+        raise ValueError(
+            f"Strike ${contract.strike:,.3f} does not fit the OSI 8-digit field "
+            f"($0.001-$99,999.999): {contract}"
+        )
     return (
         f"O:{contract.underlying}"
         f"{yy:02d}{contract.expiry.month:02d}{contract.expiry.day:02d}"
@@ -389,6 +404,13 @@ def yf_retry(
         print(f"🔁 {label}: {reason} -- retrying ({attempt}/{YF_MAX_RETRIES - 1})")
         time.sleep(YF_RETRY_BACKOFF * attempt)
     raise RuntimeError("unreachable")  # loop always returns or raises on the final attempt
+
+
+def format_split_label(ratio: float) -> str:
+    """`7-for-1 split` for a forward split (ratio >= 1), `1-for-5 split` for a reverse (ratio < 1)."""
+    if ratio >= 1:
+        return f"{ratio:g}-for-1 split"
+    return f"1-for-{1 / ratio:g} split"
 
 
 def fetch_splits(ticker: str, start: pd.Timestamp) -> pd.Series:

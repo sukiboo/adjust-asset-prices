@@ -14,6 +14,7 @@ from ..utils import (
     fetch_dividends,
     fetch_splits,
     fetch_yf_closes,
+    format_split_label,
     load_ticker_data,
     parse_date,
     resolve_index_bound,
@@ -151,8 +152,9 @@ class AssetPrices:
             # 09:30 ET, so a raw `< ts` would divide the ex-date's own pre-market bars by the ratio.
             ts = cast(pd.Timestamp, split_date).tz_convert("America/New_York").normalize()
             df.loc[df.index < ts, ticker] /= ratio
-            self.events.append(PriceEvent(ts.date(), f"{ratio:g}-for-1 split", "split"))
-            print(f"🪚  Applied {ratio:g}-for-1 split on {ts.date()} to {ticker}")
+            label = format_split_label(ratio)
+            self.events.append(PriceEvent(ts.date(), label, "split"))
+            print(f"🪚  Applied {label} on {ts.date()} to {ticker}")
         return df
 
     def backfill_prices(
