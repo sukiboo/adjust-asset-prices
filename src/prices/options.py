@@ -1,3 +1,4 @@
+from collections import Counter
 from collections.abc import Iterator, Sequence
 from datetime import date
 from typing import Literal, cast
@@ -273,11 +274,17 @@ class OptionsPrices:
         if not pre_mask.any():
             return df
 
-        rewrites = self._successor_symbols(df, split_ts, ratio, underlying)
+        rewrites, counts = self._successor_symbols(df, split_ts, ratio, underlying)
         deduped, n_twins = self._relabel_and_merge(df, pre_mask, rewrites, scale=ratio)
         print(
             f"🪚  {ratio:g}-for-1 split on {split_ts.date()}: rewrote {len(rewrites):,}"
             f" {side} contracts / {int(pre_mask.sum()):,} rows"
+            + (f", {counts['matched']:,} matched" if counts["matched"] else "")
+            + (
+                f", {counts['standalone']:,} standalone (no OCC successor)"
+                if counts["standalone"]
+                else ""
+            )
             + (f", deduped {n_twins:,} twin rows" if n_twins else "")
         )
         return deduped
@@ -366,30 +373,33 @@ class OptionsPrices:
 
     def _successor_symbols(
         self, df: pd.DataFrame, split_ts: pd.Timestamp, ratio: float, underlying: str
-    ) -> dict[str, str]:
+    ) -> tuple[dict[str, str], Counter[str]]:
         """Map every pre-split ticker — any root, incl. already-suffixed AAPL7 — to its
-        post-split successor symbol.
+        post-split successor symbol, plus a Counter of successor categories (matched/standalone)
+        for the per-split summary line.
         """
         ts_level = df.index.get_level_values("timestamp_utc")
         ticker_level = df.index.get_level_values("ticker")
-        candidates = self._suffixed_candidates(ticker_level[ts_level >= split_ts], underlying)
+        candidates = self._successor_candidates(ticker_level[ts_level >= split_ts], underlying)
         split_date = split_ts.date()
-        return {
-            cast(str, t): self._successor_for(cast(str, t), ratio, split_date, candidates)
-            for t in ticker_level[ts_level < split_ts].unique()
-        }
+        rewrites: dict[str, str] = {}
+        counts: Counter[str] = Counter()
+        for t in ticker_level[ts_level < split_ts].unique():
+            successor, kind = self._successor_for(cast(str, t), ratio, split_date, candidates)
+            rewrites[cast(str, t)] = successor
+            counts[kind] += 1
+        return rewrites, counts
 
     def _successor_for(
         self,
         ticker: str,
         ratio: float,
         split_date: date,
-        candidates: dict[tuple[date, str], list[tuple[str, float]]],
-    ) -> str:
-        """The post-split symbol `ticker` rewrites to (strike ÷ ratio, own root). Clean strikes
-        and expired-before-split contracts resolve directly; a non-clean spanning contract
-        matches OCC's suffixed-root successor in the data (closest strike within 1¢), else
-        falls back to the direct standalone symbol.
+        candidates: dict[tuple[date, str], list[tuple[str, float, bool]]],
+    ) -> tuple[str, str]:
+        """Successor symbol for `ticker` (strike ÷ ratio) + category ("direct"/"matched"/
+        "standalone"). Clean/expired strikes resolve directly; a non-clean spanning contract matches
+        the closest OCC successor within 1¢, suffixed root before base (feed dual-emits both).
         """
         parsed = parse_osi_ticker(ticker)
         new_strike = parsed.strike / ratio
@@ -401,42 +411,33 @@ class OptionsPrices:
             abs(new_strike * scale - round(new_strike * scale)) < OPTIONS_INTERNALS["integer_tol"]
         )
         if clean or parsed.expiry < split_date:
-            return direct
+            return direct, "direct"
 
         pool = candidates.get((parsed.expiry, parsed.option_type), [])
-        best = min(pool, key=lambda c: abs(c[1] - new_strike), default=None)
-        if (
-            best is not None
-            and abs(best[1] - new_strike) <= OPTIONS_INTERNALS["successor_strike_tol"]
-        ):
-            print(
-                f"🔗 Suffix-match: {ticker} → {best[0]} "
-                f"(${parsed.strike} ÷ {ratio:g} ≈ ${new_strike:.4f} ≈ ${best[1]})"
-            )
-            return best[0]
-        tgt = f"closest ${best[1]:.4f}" if best is not None else "no candidate"
-        print(
-            f"⛓️‍💥 No successor for {ticker} ({ratio:g}-for-1 on {split_date}; {tgt}); "
-            f"standalone scale → ${new_strike:.4f}"
-        )
-        return direct
+        tol = OPTIONS_INTERNALS["successor_strike_tol"]
+        for want_suffixed in (True, False):  # suffixed root is canonical; base root is the fallback
+            sub = [c for c in pool if c[2] is want_suffixed]
+            best = min(sub, key=lambda c: abs(c[1] - new_strike), default=None)
+            if best is not None and abs(best[1] - new_strike) <= tol:
+                return best[0], "matched"
+        return direct, "standalone"
 
-    def _suffixed_candidates(
+    def _successor_candidates(
         self, post_tickers: pd.Index, underlying: str
-    ) -> dict[tuple[date, str], list[tuple[str, float]]]:
-        """Index post-split suffixed-root contracts (AAPL7, NVDA1, …) by (expiry, type) for the
-        non-clean strike match. Base-root tickers merge via the clean strike-division path.
+    ) -> dict[tuple[date, str], list[tuple[str, float, bool]]]:
+        """Post-split contracts indexed by (expiry, type) as `(ticker, strike, is_suffixed)`, across
+        both OCC conventions: suffixed roots (AAPL7) and base-root cent-rounded strikes (TQQQ 3:1).
         """
-        candidates: dict[tuple[date, str], list[tuple[str, float]]] = {}
+        candidates: dict[tuple[date, str], list[tuple[str, float, bool]]] = {}
         for t in post_tickers.unique():
             parsed = parse_osi_ticker(cast(str, t))
             suffix = parsed.underlying[len(underlying) :]
-            if parsed.underlying == underlying or not (
-                parsed.underlying.startswith(underlying) and suffix.isdigit()
-            ):
+            base = parsed.underlying == underlying
+            suffixed = parsed.underlying.startswith(underlying) and suffix.isdigit()
+            if not (base or suffixed):
                 continue
             key = (parsed.expiry, parsed.option_type)
-            candidates.setdefault(key, []).append((cast(str, t), parsed.strike))
+            candidates.setdefault(key, []).append((cast(str, t), parsed.strike, suffixed))
         return candidates
 
     def _is_handled_split_ratio(self, ratio: float) -> bool:

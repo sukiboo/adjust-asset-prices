@@ -208,6 +208,30 @@ def test_tsla_2020_multi_split(options_prices: Prices) -> None:
     assert quiet_check_options(calls, puts, "TSLA", ref), "❌ TSLA structural gate failed"
 
 
+@pytest.mark.integration
+def test_tsla_2022_base_root_successor(options_prices: Prices) -> None:
+    # Base-root cent-rounded successor matching (TSLA 3:1, ex 2022-08-25 — its last split, 2020 5:1
+    # predates the window, so only ÷3 applies, no cascade). OCC keeps the base root and rounds to the
+    # cent: $700 call → $700/3 = $233.33 = C00233330. The guard is that C00233330 has REAL trades on
+    # BOTH sides — suffixed-only matching leaves the pre-split bars at the standalone milli C00233333.
+    calls, puts, ref = quiet_get_options(options_prices, "TSLA", "2022-08-22", "2022-08-26")
+    _describe_options(calls, puts, "TSLA")
+
+    succ = "O:TSLA230317C00233330"  # $700 ÷ 3 = $233.333 → cent-rounded $233.33, base root
+    assert succ in _tickers(calls), f"❌ {succ} (base-root cent-rounded ÷3 successor) missing"
+    assert "O:TSLA230317C00233333" not in _tickers(
+        calls
+    ), "❌ pre-split bars landed at the standalone milli strike — base-root match did not fire"
+    pre, post = _real_continuity(calls, succ, "2022-08-25")
+    ratio = pre / post
+    print(f"🪚  TSLA {succ}: pre=${pre:.4f}, post=${post:.4f}, ratio={ratio:.4f} (raw ~3)")
+    assert (
+        1 - CONTINUITY_EPS < ratio < 1 + CONTINUITY_EPS
+    ), f"❌ split-adjusted call continuity ratio {ratio:.3f} (expected ~1)"
+
+    assert quiet_check_options(calls, puts, "TSLA", ref), "❌ TSLA structural gate failed"
+
+
 # --- Reverse splits ---------------------------------------------------------------------------
 # These verify the reverse-split branch (yfinance ratio < 1 → premium ×k, strike K→K×k) via the
 # cumulative back-adjustment FACTOR (×20 / ×16 on the underlying + successor strike). They do NOT
